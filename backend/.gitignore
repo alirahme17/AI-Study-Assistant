@@ -2,3 +2,10 @@
 /data
 /chroma_db
 /.env
+/main.txt
+
+/workspace
+
+/pycache__
+
+

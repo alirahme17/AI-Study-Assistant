@@ -1,18 +1,12 @@
-google-api-python-client
-google-auth-httplib2
-google-auth-oauthlib
-
-# For reading text from PDFs
-PyMuPDF
-# For smart text splitting
-langchain
-
-sentence-transformers
-chromadb
-
 fastapi
 uvicorn
 pydantic
+langchain
 langchain-community
 langchain-google-genai
+google-api-python-client
+google-auth-oauthlib
+PyMuPDF
+chromadb
+sentence-transformers
 python-dotenv
