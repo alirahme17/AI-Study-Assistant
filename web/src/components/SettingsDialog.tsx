@@ -54,7 +54,7 @@ export function SettingsDialog({ me, onClose, onChanged }: { me: Me; onClose: ()
       <form onSubmit={saveKey}>
         <h3 className="font-medium">Gemini API key</h3>
         <p className="mt-1 text-sm text-muted">
-          Answers are written by Google Gemini using your own key.{" "}
+          Google Gemini indexes your PDFs and writes the answers with your own key (stored encrypted).{" "}
           <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer" className="text-ink underline underline-offset-2">
             Get a free key
           </a>

@@ -59,12 +59,14 @@ export default function Workspace() {
     };
   }, [ready, user, authHeaders]);
 
-  // While the knowledge base is being built, poll for progress.
+  // While PDFs are being indexed, poll for progress (slowly while paused or waiting).
+  // Polling also keeps the free server awake, so indexing continues while the tab is open.
+  const pollMs = me?.status === "processing" ? (me.indexing ? 3000 : 30000) : null;
   useEffect(() => {
-    if (me?.status !== "processing") return;
-    const timer = setInterval(refresh, 3000);
+    if (!pollMs) return;
+    const timer = setInterval(refresh, pollMs);
     return () => clearInterval(timer);
-  }, [me?.status, refresh]);
+  }, [pollMs, refresh]);
 
   if (!ready || !user) return null;
 
@@ -122,7 +124,7 @@ export default function Workspace() {
           <Centered>
             <p className="text-muted">Loading your courses…</p>
           </Centered>
-        ) : me.status !== "ready" && messages.length === 0 ? (
+        ) : !hasReadyFiles(me) && messages.length === 0 ? (
           <Onboarding me={me} onLibrary={() => setDialog("library")} onSettings={() => setDialog("settings")} />
         ) : (
           <Conversation
@@ -199,7 +201,7 @@ function Sidebar({
         <div className="space-y-0.5 border-t border-rule px-3 py-3">
           {me?.status === "processing" && (
             <p className="px-2 pb-2 text-xs text-muted" role="status">
-              Updating knowledge base…
+              {indexingLabel(me)}
             </p>
           )}
           <SideAction onClick={onLibrary}>Manage PDFs</SideAction>
@@ -235,18 +237,45 @@ function SideAction({ onClick, children }: { onClick: () => void; children: Reac
 
 // --------------------------------------------------------------- onboarding ---
 
+function hasReadyFiles(me: Me) {
+  return me.courses.some((c) => c.files.some((f) => f.status === "ready"));
+}
+
+function indexingLabel(me: Me) {
+  const files = me.courses.flatMap((c) => c.files);
+  const ready = files.filter((f) => f.status === "ready").length;
+  const paused = files.some((f) => f.status === "pending" && f.message.startsWith("Paused"));
+  return `${paused ? "Paused" : "Indexing"}: ${ready}/${files.length} PDFs ready`;
+}
+
 function Onboarding({ me, onLibrary, onSettings }: { me: Me; onLibrary: () => void; onSettings: () => void }) {
-  const hasFiles = me.courses.some((c) => c.files.length > 0);
+  const files = me.courses.flatMap((c) => c.files);
+  const ready = files.filter((f) => f.status === "ready").length;
   const steps = [
-    { done: hasFiles, title: "Add your course PDFs", text: "Slides, lecture notes, past exams. Group them by course.", action: "Add PDFs", onClick: onLibrary },
     {
-      done: me.status === "ready",
-      title: "Build your knowledge base",
-      text: me.status === "processing" ? me.message || "Reading your PDFs…" : "The tutor reads every page once, including scanned ones.",
-      action: me.status === "processing" ? null : "Build it",
+      done: me.has_api_key,
+      title: "Add your Gemini API key",
+      text: "Free from Google AI Studio. It reads your PDFs and writes the answers, within your own free daily limits.",
+      action: "Add key",
+      onClick: onSettings,
+    },
+    {
+      done: files.length > 0,
+      title: "Upload your course PDFs",
+      text: "Slides, lecture notes, past exams, even scanned or handwritten pages. Upload a whole folder at once.",
+      action: me.has_api_key ? "Add PDFs" : null,
       onClick: onLibrary,
     },
-    { done: me.has_api_key, title: "Add your Gemini API key", text: "Answers are written by Google Gemini with your own free key.", action: "Add key", onClick: onSettings },
+    {
+      done: files.length > 0 && ready === files.length,
+      title: "Indexing",
+      text:
+        files.length === 0
+          ? "Starts by itself after upload. You can ask questions as soon as the first PDFs are ready."
+          : me.message,
+      action: null,
+      onClick: onLibrary,
+    },
   ];
   return (
     <div className="min-h-0 flex-1 overflow-y-auto px-4 py-10 md:px-8">
@@ -255,7 +284,10 @@ function Onboarding({ me, onLibrary, onSettings }: { me: Me; onLibrary: () => vo
         <p className="mt-2 text-muted">Three steps, then ask anything about your courses.</p>
         {me.status === "error" && (
           <p role="alert" className="mt-4 rounded-md border border-danger/40 px-4 py-3 text-sm text-danger">
-            The last update failed: {me.message}
+            {me.message}{" "}
+            <button onClick={onLibrary} className="underline underline-offset-2">
+              See the files
+            </button>
           </p>
         )}
         <ol className="mt-8 space-y-3">
@@ -271,9 +303,14 @@ function Onboarding({ me, onLibrary, onSettings }: { me: Me; onLibrary: () => vo
               </span>
               <div className="min-w-0 flex-1">
                 <p className="font-medium">{s.title}</p>
-                <p className="mt-0.5 text-sm text-muted" role={me.status === "processing" && i === 1 ? "status" : undefined}>
+                <p className="mt-0.5 text-sm text-muted" role={i === 2 && me.status === "processing" ? "status" : undefined}>
                   {s.text}
                 </p>
+                {i === 2 && files.length > 0 && (
+                  <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-rule" aria-hidden>
+                    <div className="h-full bg-mark transition-[width]" style={{ width: `${(ready / files.length) * 100}%` }} />
+                  </div>
+                )}
               </div>
               {s.action && !s.done && (
                 <button onClick={s.onClick} className="self-center rounded-md border border-ink px-3 py-1.5 text-sm font-medium">

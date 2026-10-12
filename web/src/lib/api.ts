@@ -10,17 +10,34 @@ export type Source = {
   snippet: string;
 };
 
-export type CourseFile = { source: string; name: string };
+export type FileStatus = "pending" | "processing" | "ready" | "error";
+
+export type CourseFile = {
+  source: string;      // "Radar/Course/chap1.pdf"
+  course: string;
+  name: string;        // path inside the course: "Course/chap1.pdf"
+  file_name: string;   // "chap1.pdf"
+  status: FileStatus;
+  message: string;
+  pages: number | null;
+  chunks: number;
+  ocr_pages: number;
+  size_bytes: number | null;
+};
 export type Course = { name: string; files: CourseFile[] };
 
 export type Me = {
-  workspace: string;
-  status: "not_configured" | "processing" | "ready" | "error";
+  user_id: string;
+  status: "empty" | "processing" | "ready" | "error";
   message: string;
+  indexing: boolean;
   has_api_key: boolean;
-  embedding_model: string | null;
   courses: Course[];
+  max_upload_mb: number;
 };
+
+/** A file to upload, with its path inside the course ("Chapter 1/slides.pdf"). */
+export type UploadItem = { file: File; course: string; name: string };
 
 export type ChatTurn = { role: "user" | "assistant"; content: string };
 
@@ -40,7 +57,10 @@ async function request(headers: Headers, path: string, init: RequestInit = {}): 
       headers: { ...(await headers()), ...(init.headers as Record<string, string> | undefined) },
     });
   } catch {
-    throw new ApiError(0, "Can't reach the Teleco-Tutor server. Check that the backend is running.");
+    throw new ApiError(
+      0,
+      "Can't reach the Teleco-Tutor server. If it was asleep (free hosting sleeps when idle), it can take up to a minute to wake up. Try again.",
+    );
   }
   if (!res.ok) {
     let detail = `Request failed (${res.status}).`;
@@ -63,24 +83,20 @@ export const api = {
       body: JSON.stringify({ gemini_api_key: key }),
     }),
 
-  upload: async (h: Headers, course: string, files: File[]): Promise<string[]> => {
+  /** Upload one PDF into a course; indexing starts by itself on the server. */
+  upload: async (h: Headers, item: UploadItem): Promise<string[]> => {
     const form = new FormData();
-    form.append("course", course);
-    files.forEach((f) => form.append("files", f));
+    form.append("course", item.course);
+    form.append("files", item.file, item.name);
     return (await (await request(h, "/api/me/upload", { method: "POST", body: form })).json()).saved;
   },
 
   deleteFile: (h: Headers, source: string) =>
     request(h, `/api/me/files?source=${encodeURIComponent(source)}`, { method: "DELETE" }),
 
-  index: (h: Headers) => request(h, "/api/me/index", { method: "POST" }),
-
-  importDrive: (h: Headers, url: string) =>
-    request(h, "/api/me/drive", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ drive_folder_url: url }),
-    }),
+  /** Index one file again (or every file), e.g. after a failure or the daily limit. */
+  reindex: (h: Headers, source?: string) =>
+    request(h, `/api/me/index${source ? `?source=${encodeURIComponent(source)}` : ""}`, { method: "POST" }),
 
   /** Object URL of a rendered page (with the cited passage highlighted) + page count. */
   pageImage: async (h: Headers, source: string, page: number, highlight?: string) => {
@@ -128,7 +144,7 @@ export const api = {
 
 /** Turn raw Gemini errors into something a student can act on. */
 export function friendlyModelError(message: string): string {
-  if (/RESOURCE_EXHAUSTED|quota|429/i.test(message))
+  if (/RESOURCE_EXHAUSTED|quota|429|daily limit/i.test(message))
     return "Your Gemini API key has run out of free quota for today. Try again later, or switch to another model.";
   if (/API key not valid|API_KEY_INVALID|permission/i.test(message))
     return "Gemini rejected your API key. Check it in Settings.";

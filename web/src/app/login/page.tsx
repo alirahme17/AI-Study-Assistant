@@ -51,7 +51,7 @@ export default function LoginPage() {
           <form onSubmit={submit} className="mt-10 space-y-4" noValidate>
             {DEV_MODE ? (
               <>
-                <Field label="Workspace" hint="Local development mode: no password. Use an existing workspace, e.g. mhmd123.">
+                <Field label="Test user" hint="Local development mode: no password. Any name gives you a separate test library.">
                   <input
                     autoFocus
                     value={workspace}
@@ -104,7 +104,7 @@ export default function LoginPage() {
               disabled={busy}
               className="w-full rounded-md bg-ink px-4 py-2.5 font-medium text-paper disabled:opacity-60"
             >
-              {DEV_MODE ? "Open workspace" : mode === "signin" ? (busy ? "Signing in…" : "Sign in") : busy ? "Creating account…" : "Create account"}
+              {DEV_MODE ? "Continue" : mode === "signin" ? (busy ? "Signing in…" : "Sign in") : busy ? "Creating account…" : "Create account"}
             </button>
           </form>
 

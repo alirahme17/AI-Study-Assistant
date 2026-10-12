@@ -172,7 +172,7 @@ def me(user_id: str = Depends(current_user)):
         "status": status["status"],
         "message": status["message"],
         "indexing": indexer.is_running(user_id),
-        "has_api_key": has_key or settings.FAKE_LLM,
+        "has_api_key": has_key,
         "courses": documents.courses_with_files(docs),
         "max_upload_mb": settings.MAX_UPLOAD_MB,
     }
