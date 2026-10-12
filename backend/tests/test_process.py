@@ -43,3 +43,12 @@ def test_long_page_is_split_but_keeps_its_page(isolated_workspaces):
     chunks = process_user_pdfs("alice")
     assert len(chunks) > 1
     assert {c.metadata["page"] for c in chunks} == {1}
+
+
+def test_clean_text_removes_garbage_glyphs_but_keeps_real_text():
+    from process import clean_text
+    raw = "Alphabet of 2ଵ଺=65,536 symbols � and énergie, Δf, ×, ≈, ½"
+    cleaned = clean_text(raw)
+    assert "ଵ" not in cleaned and "" not in cleaned and "�" not in cleaned
+    assert "énergie" in cleaned and "Δf" in cleaned and "≈" in cleaned and "½" in cleaned
+    assert "  " not in cleaned

@@ -32,7 +32,8 @@ class FakeChatModel:
             return "I couldn't find this in your course materials."
         parts = ["*(Offline demo answer - FAKE_LLM is on, so this quotes your sources instead of asking Gemini.)*\n"]
         for number, _label, body in sources[:3]:
-            sentence = re.split(r"(?<=[.!?])\s", " ".join(body.split()), maxsplit=1)[0]
+            sentences = re.split(r"(?<=[.!?])\s", " ".join(body.split()))
+            sentence = next((x for x in sentences if len(x) >= 40), sentences[0])
             parts.append(f"{sentence[:280]} [{number}]")
         parts.append("\nFor example, the range follows $R = \\frac{c \\cdot t_d}{2}$ when the delay is $t_d$ [1].")
         return "\n\n".join(parts)

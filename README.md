@@ -22,7 +22,7 @@ Teleco-Tutor is a full-stack, multi-user web application that allows users to tr
 ## \#\# Tech Stack
 
   * **Backend:** Python, FastAPI, Uvicorn
-  * **Frontend:** Streamlit, Streamlit-Authenticator
+  * **Frontend:** Next.js 16, React 19, Tailwind CSS 4, KaTeX, Supabase Auth
   * **AI/ML:** LangChain, Google Gemini (default `gemini-3.8-flash`, configurable), Sentence-Transformers (`intfloat/multilingual-e5-small`, English + French), PyMuPDF
   * **Database:** ChromaDB (Vector Store) + BM25 keyword index (rank_bm25)
   * **OCR:** RapidOCR (ONNX Runtime, no external install)
@@ -115,30 +115,41 @@ cd teleco-tutor
 
 ## \#\# How to Run the Application 🚀
 
-You must run the backend and frontend servers in two separate terminals.
+Run the backend and the web app in two terminals.
 
-### \#\#\# Terminal 1: Start the Backend
+### Terminal 1: backend (FastAPI)
 
 ```bash
 cd backend
-source venv/bin/activate # Or venv\Scripts\activate
-uvicorn main:app --reload
+source venv/bin/activate          # Windows: .\venv\Scripts\Activate.ps1
+AUTH_MODE=dev uvicorn main:app --reload   # Windows: $env:AUTH_MODE="dev"; uvicorn main:app --reload
 ```
 
-The backend will be running at `http://127.0.0.1:8000`.
+Useful environment variables:
 
-To use a different Gemini model, set `GEMINI_MODEL` before starting the backend, e.g. in PowerShell:
-`$env:GEMINI_MODEL="gemini-3.5-flash-lite"` (cheaper and faster).
+| Variable | Meaning |
+|---|---|
+| `AUTH_MODE` | `dev` (local, no passwords) or `supabase` (default when `SUPABASE_URL` is set) |
+| `SUPABASE_URL` / `SUPABASE_JWT_SECRET` | Verify Supabase sign-in tokens (secret only for legacy HS256 projects) |
+| `CORS_ORIGINS` | Allowed frontend origins, default `http://localhost:3000` |
+| `GEMINI_MODEL` | Answer model, default `gemini-3.8-flash` |
+| `RETRIEVAL_MODE` | `hybrid` (default), `vector` or `bm25` |
+| `EMBEDDING_MODEL` | Model for new indexes, default `intfloat/multilingual-e5-small` |
+| `OCR_ENGINE` | `rapidocr` (default) or `none` |
+| `FAKE_LLM` | `1` = offline demo answers that quote the sources (no Gemini calls) |
 
-### \#\#\# Terminal 2: Start the Frontend
+### Terminal 2: web app (Next.js)
 
 ```bash
-cd frontend
-source venv/bin/activate # Or venv\Scripts\activate
-streamlit run app.py
+cd web
+npm install
+copy .env.example .env.local      # macOS/Linux: cp .env.example .env.local
+npm run dev
 ```
 
-Your browser will open to `http://localhost:8501`, where you can use the application.
+Open `http://localhost:3000`. See `web/README.md` for details.
+
+> The original Streamlit app in `frontend/` still works in dev mode but is being replaced by `web/`.
 
 -----
 

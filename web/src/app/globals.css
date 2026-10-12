@@ -1,0 +1,189 @@
+@import "tailwindcss";
+@import "katex/dist/katex.min.css";
+@import "@fontsource-variable/instrument-sans";
+@import "@fontsource-variable/source-serif-4";
+
+/*
+ * Teleco-Tutor tokens.
+ * Cool notebook paper + ink navy; the one bold element is the highlighter yellow
+ * that links a citation in an answer to the highlighted passage on the PDF page.
+ */
+:root {
+  --paper: #f4f6f5;        /* app background: cool, slightly green-grey paper */
+  --surface: #ffffff;      /* reading surfaces: answers, page viewer */
+  --ink: #172033;          /* text and primary actions */
+  --muted: #5b6b7a;        /* secondary text */
+  --rule: #dce3e0;         /* borders, like the faint lines of a notebook */
+  --mark: #ffe066;         /* highlighter */
+  --mark-ink: #3a2f00;     /* text on highlighter */
+  --danger: #b42318;
+  --ok: #1d7a4f;
+  --focus: #2f6fdf;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #131c2b;
+    --surface: #1a2536;
+    --ink: #e6ebe9;
+    --muted: #9aa8b5;
+    --rule: #2b3a4f;
+    --mark: #e9c84a;
+    --mark-ink: #1d1700;
+    --danger: #f2877d;
+    --ok: #5fc596;
+    --focus: #7aa7ff;
+    color-scheme: dark;
+  }
+}
+
+:root[data-theme="dark"] {
+  --paper: #131c2b;
+  --surface: #1a2536;
+  --ink: #e6ebe9;
+  --muted: #9aa8b5;
+  --rule: #2b3a4f;
+  --mark: #e9c84a;
+  --mark-ink: #1d1700;
+  --danger: #f2877d;
+  --ok: #5fc596;
+  --focus: #7aa7ff;
+  color-scheme: dark;
+}
+
+@theme inline {
+  --color-paper: var(--paper);
+  --color-surface: var(--surface);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-rule: var(--rule);
+  --color-mark: var(--mark);
+  --color-mark-ink: var(--mark-ink);
+  --color-danger: var(--danger);
+  --color-ok: var(--ok);
+  --font-sans: "Instrument Sans Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-serif: "Source Serif 4 Variable", ui-serif, Georgia, serif;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Answers: a serif reading column with comfortable measure and rhythm. */
+.answer {
+  font-family: var(--font-serif);
+  font-size: 1.0625rem;
+  line-height: 1.65;
+  max-width: 68ch;
+}
+.answer p {
+  margin: 0 0 0.85em;
+}
+.answer p:last-child {
+  margin-bottom: 0;
+}
+.answer ul,
+.answer ol {
+  margin: 0 0 0.85em 1.25em;
+}
+.answer ul {
+  list-style: disc;
+}
+.answer ol {
+  list-style: decimal;
+}
+.answer li {
+  margin: 0.2em 0;
+}
+.answer strong {
+  font-weight: 650;
+}
+.answer code {
+  font-size: 0.9em;
+  background: color-mix(in srgb, var(--rule) 55%, transparent);
+  padding: 0.05em 0.3em;
+  border-radius: 3px;
+}
+.answer .katex {
+  white-space: nowrap; /* never split a formula (e.g. between t and its subscript) across lines */
+}
+.answer .katex-display {
+  margin: 0.6em 0 0.9em;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.15em 0;
+}
+.answer table {
+  border-collapse: collapse;
+  margin: 0 0 0.85em;
+  font-size: 0.95em;
+}
+.answer th,
+.answer td {
+  border: 1px solid var(--rule);
+  padding: 0.3em 0.6em;
+}
+
+/* Citation chips look like a highlighter stroke over the number. */
+.cite {
+  display: inline-block;
+  font-family: var(--font-sans);
+  font-size: 0.72em;
+  font-weight: 600;
+  line-height: 1;
+  padding: 0.28em 0.42em 0.24em;
+  margin: 0 0.08em;
+  vertical-align: 0.18em;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--mark) 70%, transparent);
+  color: var(--mark-ink);
+  cursor: pointer;
+  transition: background-color 120ms ease;
+}
+.cite:hover,
+.cite[aria-pressed="true"] {
+  background: var(--mark);
+}
+
+/* Blinking caret while an answer streams in. */
+.caret::after {
+  content: "";
+  display: inline-block;
+  width: 0.45em;
+  height: 1em;
+  margin-left: 0.1em;
+  vertical-align: -0.12em;
+  background: var(--muted);
+  animation: caret 1s steps(1) infinite;
+}
+@keyframes caret {
+  50% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}

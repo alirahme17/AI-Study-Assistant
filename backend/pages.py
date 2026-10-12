@@ -48,8 +48,13 @@ def render_page(pdf_path: str, page_number: int, highlight: Optional[str] = None
             raise IndexError(f"Page {page_number} does not exist (the PDF has {len(doc)} pages).")
         page = doc[page_number - 1]
         if highlight:
+            seen = set()
             for phrase in list(_phrases(highlight))[:_MAX_PHRASES]:
                 for quad in page.search_for(phrase, quads=True):
+                    key = tuple(round(v) for v in quad.rect)
+                    if key in seen:          # same spot found by two phrases: don't double the ink
+                        continue
+                    seen.add(key)
                     annot = page.add_highlight_annot(quad)
                     annot.set_colors(stroke=HIGHLIGHT_RGB)
                     annot.update()

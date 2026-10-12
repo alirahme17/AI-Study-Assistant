@@ -1,4 +1,5 @@
 import os
+import re
 from typing import Callable, Optional
 
 import pymupdf
@@ -10,6 +11,17 @@ from workspace import data_path, workspace_path
 
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 200
+
+# Some PDFs map math/symbol fonts to private-use code points, or to unrelated scripts
+# (e.g. "2^16" extracted as Oriya letters). This junk pollutes search and confuses the
+# model; the course material is English/French, so these ranges are dropped.
+_JUNK = re.compile("[\ue000-\uf8ff\U000f0000-\U0010ffff\u0900-\u0dff\ufffd]")
+_SPACES = re.compile(r"[ \t\u00a0]{2,}")
+
+
+def clean_text(text: str) -> str:
+    """Remove garbage glyphs and the runs of spaces they leave behind."""
+    return _SPACES.sub(" ", _JUNK.sub(" ", text))
 
 
 def _course_of(relative_path: str) -> str:
@@ -50,6 +62,7 @@ def process_pdf(file_path: str, relative_path: str, ocr_cache: Optional[OcrCache
                 from_ocr = True
             else:
                 text = page.get_text()
+            text = clean_text(text)
             if not text.strip():
                 continue  # blank page, or scan with nothing readable
             for i, piece in enumerate(splitter.split_text(text)):
