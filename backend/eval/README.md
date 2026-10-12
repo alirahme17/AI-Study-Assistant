@@ -22,3 +22,14 @@
 ## Adding questions
 
 Open the CSV in Excel or LibreOffice, add a row, keep the same columns, and save as **CSV UTF-8**. Take `source` from the Sources panel in the chat (it shows the same path), or from the folder structure under `workspaces/<user>/data/`.
+
+## Running the evaluation
+
+From the `backend` folder, with the virtual environment active:
+
+```powershell
+python eval/run_eval.py --user mhmd123                  # full run (uses the user's Gemini key)
+python eval/run_eval.py --user mhmd123 --retrieval-only # retrieval metrics only, no API calls
+```
+
+Each run writes `eval/results/<timestamp>_<model>/report.md` (readable summary) and `results.json` (everything, for comparing runs). The answer judge is the same Gemini model that writes the answers, so treat the answer score as a strong signal, not ground truth; the retrieval and citation metrics are exact.

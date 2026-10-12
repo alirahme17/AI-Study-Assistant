@@ -176,6 +176,19 @@ def get_courses(username: str):
         return {"courses": []}
 
 
+def retrieve(llm, db, question: str, course: Optional[str], history: list, k: int = TOP_K):
+    """The retrieval half of the RAG pipeline, shared by the API and the evaluation.
+
+    Returns (search_query, docs). Memory step 1: with chat history, follow-ups like
+    "what about its range?" are rewritten into a standalone search query first.
+    """
+    search_query = condense_question(llm, question, history)
+    search_kwargs = {"k": k}
+    if course:
+        search_kwargs["filter"] = {"course": {"$eq": course}}
+    return search_query, db.similarity_search(query=search_query, **search_kwargs)
+
+
 def _event(kind: str, **data) -> str:
     """One line of newline-delimited JSON (NDJSON)."""
     return json.dumps({"type": kind, **data}, ensure_ascii=False) + "\n"
@@ -208,14 +221,7 @@ def query_database(payload: QueryPayload):
             llm = make_llm(api_key)
             db = open_vector_store(persist_directory)
 
-            # Memory, step 1: make follow-ups ("what about its range?") searchable.
-            search_query = condense_question(llm, payload.question, history)
-
-            search_kwargs = {"k": TOP_K}
-            if payload.course:
-                search_kwargs["filter"] = {"course": {"$eq": payload.course}}
-            docs = db.similarity_search(query=search_query, **search_kwargs)
-
+            search_query, docs = retrieve(llm, db, payload.question, payload.course, history)
             context, sources = number_sources(docs)
             yield _event("sources", sources=sources, search_query=search_query)
 
