@@ -19,3 +19,8 @@ venv/
 
 # --- Old prototype ---
 backend/main.txt
+
+# --- Test artifacts ---
+.coverage
+htmlcov/
+.pytest_cache/
