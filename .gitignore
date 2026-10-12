@@ -3,13 +3,14 @@
 *.env
 token.json
 credentials.json
-frontend/config.yaml
+!.env.example
 
 # --- User data (PDFs, vector DBs) ---
 backend/workspaces/
 workspaces/
 data/
 chroma_db/
+backend/storage/
 
 # --- Python ---
 __pycache__/

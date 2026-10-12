@@ -3,28 +3,14 @@
 The frontend shows this next to the answer, so a student sees exactly where in
 their course material a claim comes from.
 """
-import os
 import re
 from typing import Optional
 
 import pymupdf
 
-from workspace import data_path
-
 RENDER_DPI = 110
 HIGHLIGHT_RGB = (1.0, 0.878, 0.4)       # highlighter yellow, matches the UI (#FFE066)
 _MAX_PHRASES = 6
-
-
-def resolve_source(username: str, source: str) -> str:
-    """Absolute path of a user's PDF; refuses anything outside their data folder."""
-    root = os.path.realpath(data_path(username))
-    path = os.path.realpath(os.path.join(root, source))
-    if not path.startswith(root + os.sep) or not path.lower().endswith(".pdf"):
-        raise ValueError("Invalid source path.")
-    if not os.path.isfile(path):
-        raise FileNotFoundError(source)
-    return path
 
 
 def _phrases(snippet: str):
@@ -40,10 +26,10 @@ def _phrases(snippet: str):
             yield phrase
 
 
-def render_page(pdf_path: str, page_number: int, highlight: Optional[str] = None,
-                dpi: int = RENDER_DPI) -> bytes:
-    """PNG bytes of one page (1-based). Highlights phrases from `highlight` when found."""
-    with pymupdf.open(pdf_path) as doc:
+def render_page(pdf: bytes, page_number: int, highlight: Optional[str] = None,
+                dpi: int = RENDER_DPI) -> tuple:
+    """(PNG bytes of one page (1-based), page count). Highlights phrases from `highlight` when found."""
+    with pymupdf.open(stream=pdf, filetype="pdf") as doc:
         if not 1 <= page_number <= len(doc):
             raise IndexError(f"Page {page_number} does not exist (the PDF has {len(doc)} pages).")
         page = doc[page_number - 1]
@@ -58,9 +44,4 @@ def render_page(pdf_path: str, page_number: int, highlight: Optional[str] = None
                     annot = page.add_highlight_annot(quad)
                     annot.set_colors(stroke=HIGHLIGHT_RGB)
                     annot.update()
-        return page.get_pixmap(dpi=dpi, annots=True).tobytes("png")
-
-
-def page_count(pdf_path: str) -> int:
-    with pymupdf.open(pdf_path) as doc:
-        return len(doc)
+        return page.get_pixmap(dpi=dpi, annots=True).tobytes("png"), len(doc)

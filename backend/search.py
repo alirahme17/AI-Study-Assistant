@@ -1,29 +1,36 @@
-"""Keyword (BM25) search and hybrid fusion with the vector search.
+"""Hybrid retrieval in Postgres: vector search (pgvector) + keyword search (full text),
+fused with Reciprocal Rank Fusion.
 
-Why: the embedding model (all-MiniLM-L6-v2) captures meaning but is weak on exact
-technical tokens ("DSDV", "RRTS", "PC1", "S11") and on French text. BM25 matches
-words exactly. Reciprocal Rank Fusion (RRF) merges both ranked lists without
-having to calibrate their very different score scales.
+Why both: embeddings capture meaning ("how far can a radar see" ~ "maximum range"),
+keywords catch exact technical tokens ("DSDV", "RRTS", "PC1", "S11") that embeddings
+blur. RRF merges the two ranked lists without calibrating their score scales.
 
-The keyword index is built from the chunks already stored in Chroma, so existing
-databases get hybrid search without re-indexing.
+Keyword scoring approximates BM25: each query term's match score (ts_rank, length
+normalised) is weighted by the term's IDF in the user's own chunks, so rare,
+specific words count more than words found everywhere.
 """
+import math
 import re
 import unicodedata
-from typing import Iterable, List, Optional
+from typing import List, Optional
 
 from langchain_core.documents import Document
 
-RRF_K = 60            # standard RRF constant: dampens the weight of top ranks
-CANDIDATES_PER_LIST = 4   # each list contributes TOP_K * this many candidates to the fusion
+from db import vector_literal
 
-# Small EN + FR stop-word list: words that match everywhere and only add noise to BM25.
+RRF_K = 60                 # standard RRF constant: dampens the weight of top ranks
+CANDIDATES_PER_LIST = 4    # each list contributes k * this many candidates to the fusion
+MAX_QUERY_TERMS = 24
+
+# Small EN + FR stop-word list: words that match everywhere and only add noise.
 STOPWORDS = set("""
 a an and are as at be by can do does for from has have how in is it its of on or that the
 their them then there these this to was were what when where which who why will with
 au aux avec ce ces dans de des du elle en est et il ils la le les leur mais ne ou par pas
 pour qu que qui sa se ses son sont sur un une est-ce quel quelle quelles quels
 """.split())
+
+_COLUMNS = """c.id, c.content, c.page, c.chunk_index, c.ocr, c.course, d.name, d.id as document_id"""
 
 
 def tokenize(text: str) -> List[str]:
@@ -33,45 +40,65 @@ def tokenize(text: str) -> List[str]:
     return [t for t in re.findall(r"[a-z0-9]+", text) if t not in STOPWORDS and (len(t) > 1 or t.isdigit())]
 
 
-def doc_key(doc: Document) -> tuple:
-    """Identity of a chunk across the two searches."""
-    meta = doc.metadata or {}
-    return (meta.get("source") or meta.get("source_file"), meta.get("page"), meta.get("chunk_index"),
-            hash(doc.page_content))
+def _query_terms(query: str) -> List[str]:
+    seen = []
+    for t in tokenize(query):
+        if t not in seen:
+            seen.append(t)
+    return seen[:MAX_QUERY_TERMS]
 
 
-class KeywordIndex:
-    """BM25 over a fixed set of chunks, with optional course filtering."""
+def _to_doc(row) -> Document:
+    chunk_id, content, page, chunk_index, ocr, course, name, document_id = row[:8]
+    source = f"{course}/{name}"
+    return Document(page_content=content, metadata={
+        "chunk_id": chunk_id, "source": source, "file_name": name.rsplit("/", 1)[-1],
+        "course": course, "page": page, "chunk_index": chunk_index, "ocr": ocr,
+        "document_id": str(document_id),
+    })
 
-    def __init__(self, docs: Iterable[Document]):
-        from rank_bm25 import BM25Okapi
-        self.docs = list(docs)
-        tokenized = [tokenize(d.page_content) for d in self.docs]
-        # BM25Okapi cannot handle an empty corpus or all-empty documents.
-        self._bm25 = BM25Okapi(tokenized) if any(tokenized) else None
 
-    @classmethod
-    def from_chroma(cls, db) -> "KeywordIndex":
-        data = db.get(include=["documents", "metadatas"])
-        return cls(Document(page_content=text or "", metadata=meta or {})
-                   for text, meta in zip(data["documents"], data["metadatas"]))
+def _scope(user_id, course: Optional[str]):
+    sql, params = "c.user_id = %s", [user_id]
+    if course:
+        sql += " and c.course = %s"
+        params.append(course)
+    return sql, params
 
-    def search(self, query: str, k: int, course: Optional[str] = None) -> List[Document]:
-        terms = tokenize(query)
-        if self._bm25 is None or not terms:
-            return []
-        scores = self._bm25.get_scores(terms)
-        ranked = sorted(range(len(self.docs)), key=lambda i: scores[i], reverse=True)
-        out = []
-        for i in ranked:
-            if scores[i] <= 0:
-                break
-            if course and (self.docs[i].metadata or {}).get("course") != course:
-                continue
-            out.append(self.docs[i])
-            if len(out) == k:
-                break
-        return out
+
+def vector_search(conn, user_id, query_vector: List[float], k: int, course: Optional[str] = None) -> List[Document]:
+    where, params = _scope(user_id, course)
+    vec = vector_literal(query_vector)
+    rows = conn.execute(
+        f"select {_COLUMNS} from tt_chunks c join tt_documents d on d.id = c.document_id "
+        f"where {where} order by c.embedding <=> %s::vector limit %s",
+        [*params, vec, k]).fetchall()
+    return [_to_doc(r) for r in rows]
+
+
+def keyword_search(conn, user_id, query: str, k: int, course: Optional[str] = None) -> List[Document]:
+    terms = _query_terms(query)
+    if not terms:
+        return []
+    where, params = _scope(user_id, course)
+
+    # Document frequency of each term among this user's chunks -> IDF weights.
+    stats = conn.execute(
+        "select count(*), " + ", ".join("count(*) filter (where c.fts @@ to_tsquery('simple', %s))" for _ in terms)
+        + f" from tt_chunks c where {where}", [*terms, *params]).fetchone()
+    total, dfs = stats[0], stats[1:]
+    weighted = [(t, math.log(1 + (total - df + 0.5) / (df + 0.5))) for t, df in zip(terms, dfs) if df > 0]
+    if not weighted:
+        return []
+
+    score = " + ".join("%s * ts_rank(c.fts, to_tsquery('simple', %s), 1)" for _ in weighted)
+    any_term = " | ".join(t for t, _ in weighted)       # tokens are [a-z0-9]+: safe in a tsquery
+    score_params = [p for t, idf in weighted for p in (idf, t)]
+    rows = conn.execute(
+        f"select {_COLUMNS}, ({score}) as score from tt_chunks c join tt_documents d on d.id = c.document_id "
+        f"where {where} and c.fts @@ to_tsquery('simple', %s) order by score desc, c.id limit %s",
+        [*score_params, *params, any_term, k]).fetchall()
+    return [_to_doc(r) for r in rows]
 
 
 def rrf_fuse(ranked_lists: List[List[Document]], k: int, rrf_k: int = RRF_K) -> List[Document]:
@@ -79,33 +106,25 @@ def rrf_fuse(ranked_lists: List[List[Document]], k: int, rrf_k: int = RRF_K) -> 
     scores, docs = {}, {}
     for ranked in ranked_lists:
         for rank, doc in enumerate(ranked, start=1):
-            key = doc_key(doc)
+            key = doc.metadata["chunk_id"]
             docs.setdefault(key, doc)
             scores[key] = scores.get(key, 0.0) + 1.0 / (rrf_k + rank)
     best = sorted(scores, key=scores.get, reverse=True)[:k]
     return [docs[key] for key in best]
 
 
-def search(db, keyword_index: Optional[KeywordIndex], query: str, k: int,
-           course: Optional[str] = None, mode: str = "hybrid") -> List[Document]:
-    """Retrieve k chunks with mode "vector", "bm25" or "hybrid"."""
-    if mode not in ("vector", "bm25", "hybrid"):
+def search(conn, user_id, embedder, query: str, k: int, course: Optional[str] = None,
+           mode: str = "hybrid") -> List[Document]:
+    """Retrieve k chunks of this user's documents with mode "vector", "keyword" or "hybrid"."""
+    if mode == "bm25":
+        mode = "keyword"          # name used by older evaluation reports
+    if mode not in ("vector", "keyword", "hybrid"):
         raise ValueError(f"Unknown retrieval mode: {mode!r}")
-    if mode != "vector" and keyword_index is None:
-        mode = "vector"  # no keyword index available: degrade gracefully
-
-    n_candidates = k * CANDIDATES_PER_LIST if mode == "hybrid" else k
-    vector_hits, keyword_hits = [], []
-    if mode in ("vector", "hybrid"):
-        kwargs = {"k": n_candidates}
-        if course:
-            kwargs["filter"] = {"course": {"$eq": course}}
-        vector_hits = db.similarity_search(query=query, **kwargs)
-    if mode in ("bm25", "hybrid"):
-        keyword_hits = keyword_index.search(query, n_candidates, course)
-
+    n = k * CANDIDATES_PER_LIST if mode == "hybrid" else k
+    vector_hits = vector_search(conn, user_id, embedder.embed_query(query), n, course) if mode != "keyword" else []
+    keyword_hits = keyword_search(conn, user_id, query, n, course) if mode != "vector" else []
     if mode == "vector":
         return vector_hits
-    if mode == "bm25":
+    if mode == "keyword":
         return keyword_hits
     return rrf_fuse([vector_hits, keyword_hits], k)

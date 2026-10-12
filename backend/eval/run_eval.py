@@ -2,11 +2,14 @@
 
 Usage (from the backend folder, with the venv active):
 
-    python eval/run_eval.py --user mhmd123                  # full run: retrieval + answers + judge
-    python eval/run_eval.py --user mhmd123 --retrieval-only # no Gemini calls, no API key needed
-    python eval/run_eval.py --user mhmd123 --ids q05,q06    # a subset
-    python eval/run_eval.py --user mhmd123 --resume         # continue the latest unfinished run
-    python eval/run_eval.py --user mhmd123 --compare        # retrieval only: vector vs bm25 vs hybrid
+    python eval/run_eval.py --user you@example.com                  # full run: retrieval + answers + judge
+    python eval/run_eval.py --user you@example.com --retrieval-only # no answers / judge (embeds the questions)
+    python eval/run_eval.py --user you@example.com --ids q05,q06    # a subset
+    python eval/run_eval.py --user you@example.com --resume         # continue the latest unfinished run
+    python eval/run_eval.py --user you@example.com --compare        # retrieval only: vector vs keyword vs hybrid
+
+--user is the account's e-mail (looked up in Supabase Auth), its user id, or a dev-mode
+test user name. DATABASE_URL must point at the database (see .env.example).
 
 Free-tier Gemini keys have a small DAILY quota per model. The judge therefore uses a different
 model (--judge-model) so its calls come out of a separate quota, and when a daily quota runs out
@@ -126,60 +129,43 @@ def parse_json_reply(text):
     return json.loads(match.group(0))
 
 
-class QuotaExhausted(Exception):
-    """A daily (or otherwise long) quota ran out: retrying now is pointless."""
-
-
-def _is_long_quota(message: str) -> bool:
-    if re.search(r"PerDay|per day|daily", message, re.I):
-        return True
-    # "Please retry in 11h11m16s" / "retryDelay': '40276s'" -> anything over 2 minutes
-    hours = re.search(r"retry in (\d+)h", message)
-    seconds = re.search(r"retryDelay'?:\s*'(\d+)s", message)
-    return bool(hours) or bool(seconds and int(seconds.group(1)) > 120)
-
-
-def with_retry(fn, attempts=4, base_delay=5, sleep=None):
-    """Retry on per-minute rate limits / transient errors with exponential backoff.
-
-    Daily quota errors raise QuotaExhausted immediately instead of retrying.
-    """
-    sleep = sleep or time.sleep
-    for i in range(attempts):
-        try:
-            return fn()
-        except Exception as e:
-            message = str(e)
-            if re.search(r"429|RESOURCE_EXHAUSTED|quota", message, re.I) and _is_long_quota(message):
-                raise QuotaExhausted(message.split("\n")[0][:300]) from e
-            transient = re.search(r"429|rate|quota|exhausted|503|unavailable|timeout|deadline", message, re.I)
-            if not transient or i == attempts - 1:
-                raise
-            wait = base_delay * 2 ** i
-            print(f"    transient error ({type(e).__name__}), retrying in {wait}s...")
-            sleep(wait)
+from quota import QuotaExhausted, with_retry  # noqa: E402  (re-exported for tests)
 
 
 # ------------------------------------------------------------------- running ---
 
-def evaluate(questions, db, llm=None, judge=None, k=None, delay=0.0, log=print, on_result=None,
-             keyword_index=None, mode=None):
+class DbRetriever:
+    """The app's own retrieval (search.search) for one user, as retriever(question, course, k, mode)."""
+
+    def __init__(self, user_id, embedder):
+        self.user_id, self.embedder = user_id, embedder
+
+    def __call__(self, question, course, k, mode):
+        import db
+        from search import search
+        with db.connect() as conn:
+            return with_retry(lambda: search(conn, self.user_id, self.embedder, question, k, course, mode))
+
+
+def evaluate(questions, retriever, llm=None, judge=None, k=None, delay=0.0, log=print, on_result=None, mode=None):
     """Run every question through the same retrieval + prompt the app uses.
+
+    retriever(question, course, k, mode) -> chunks (DbRetriever in real runs, a fake in tests).
 
     Calls on_result(res) after each question (used to save progress). Stops early,
     returning what is finished, if a daily API quota runs out.
     """
     from langchain_core.messages import HumanMessage
-    import main
+    import settings
     from rag import build_messages, message_text, number_sources
 
-    k = k or main.TOP_K
+    k = k or settings.TOP_K
     results = []
     for q in questions:
         log(f"[{q['id']}] {q['question'][:80]}")
         try:
-            res = _evaluate_one(q, db, llm, judge, k, main, build_messages, message_text, number_sources,
-                                HumanMessage, keyword_index, mode)
+            res = _evaluate_one(q, retriever, llm, judge, k, build_messages, message_text, number_sources,
+                                HumanMessage, mode)
         except QuotaExhausted as e:
             log(f"\n!! Daily API quota exhausted, stopping early: {e}")
             break
@@ -191,15 +177,14 @@ def evaluate(questions, db, llm=None, judge=None, k=None, delay=0.0, log=print, 
     return results
 
 
-def _evaluate_one(q, db, llm, judge, k, main, build_messages, message_text, number_sources, HumanMessage,
-                  keyword_index=None, mode=None):
+def _evaluate_one(q, retriever, llm, judge, k, build_messages, message_text, number_sources, HumanMessage,
+                  mode=None):
     """Retrieve, answer and judge one question; raises QuotaExhausted on a daily quota."""
     res = {"id": q["id"], "course": q["course"], "type": q["type"], "language": q["language"],
            "question": q["question"], "reference": q["reference_answer"],
            "gold": sorted(f"{s} p{p}" for s, p in q["gold"]), "negative": q["is_negative"]}
     started = time.time()
-    _, docs = main.retrieve(llm, db, q["question"], q["course"] or None, [], k=k,
-                            keyword_index=keyword_index, mode=mode)
+    docs = retriever(q["question"], q["course"] or None, k, mode)
     res["retrieval"] = retrieval_metrics(docs, q["gold"])
 
     if llm is not None:
@@ -322,18 +307,16 @@ def write_report(results, summary, config, out_dir):
         f.write("\n".join(lines) + "\n")
 
 
-def compare_modes(questions, db, keyword_index, k, persist_directory, embedding_model):
+def compare_modes(questions, retriever, k, label, embedding_model):
     """Retrieval-only comparison of the three modes; writes eval/results/<stamp>_compare/report.md."""
-    import main
-    modes = ["vector", "bm25", "hybrid"]
-    runs = {m: evaluate(questions, db, None, None, k=k, log=lambda *_: None, keyword_index=keyword_index, mode=m)
-            for m in modes}
+    modes = ["vector", "keyword", "hybrid"]
+    runs = {m: evaluate(questions, retriever, None, None, k=k, log=lambda *_: None, mode=m) for m in modes}
     summaries = {m: summarize(r) for m, r in runs.items()}
     answerable = [q for q in questions if not q["is_negative"]]
 
     lines = [f"# Retrieval comparison — {datetime.now().strftime('%Y%m%d-%H%M%S')}", "",
              f"Embeddings `{embedding_model}` · top-k {k} · {len(answerable)} answerable questions · "
-             f"database `{os.path.basename(persist_directory)}`", "",
+             f"user `{label}`", "",
              "| Metric | " + " | ".join(modes) + " |", "|---|" + "---|" * len(modes),
              f"| hit@{k} (right page) | " + " | ".join(pct(summaries[m]["hit_at_k"]) for m in modes) + " |",
              "| right PDF | " + " | ".join(pct(summaries[m]["file_hit_at_k"]) for m in modes) + " |",
@@ -376,9 +359,25 @@ def latest_run_dir():
     return os.path.join(RESULTS_DIR, runs[-1]) if runs else None
 
 
+def resolve_user(conn, who: str) -> str:
+    """User id from an e-mail (Supabase Auth), a UUID, or a dev-mode test user name."""
+    import uuid
+    from auth import dev_user_id
+    try:
+        return str(uuid.UUID(who))
+    except ValueError:
+        pass
+    if "@" in who:
+        row = conn.execute("select id from auth.users where lower(email) = lower(%s)", [who]).fetchone()
+        if not row:
+            sys.exit(f"No account with e-mail {who}.")
+        return str(row[0])
+    return dev_user_id(who)
+
+
 def main_cli(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--user", required=True, help="workspace username whose database and API key to use")
+    parser.add_argument("--user", required=True, help="account e-mail, user id, or dev-mode test user name")
     parser.add_argument("--retrieval-only", action="store_true", help="skip answer generation and judging")
     parser.add_argument("--ids", help="comma-separated question ids, e.g. q01,q05")
     parser.add_argument("--k", type=int, help="number of chunks to retrieve (default: the app's TOP_K)")
@@ -387,40 +386,44 @@ def main_cli(argv=None):
                         help="model that grades the answers; a different model uses a separate free-tier quota")
     parser.add_argument("--resume", nargs="?", const="latest", metavar="RUN_DIR",
                         help="continue an unfinished run (default: the latest one), skipping finished questions")
-    parser.add_argument("--retrieval", choices=["vector", "bm25", "hybrid"],
+    parser.add_argument("--retrieval", choices=["vector", "keyword", "bm25", "hybrid"],
                         help="retrieval mode (default: the app's RETRIEVAL_MODE)")
     parser.add_argument("--compare", action="store_true",
-                        help="retrieval only: run vector, bm25 and hybrid and compare them (no API calls)")
+                        help="retrieval only: run vector, keyword and hybrid and compare them")
     parser.add_argument("--delay", type=float, default=1.0, help="seconds to wait between questions (rate limits)")
     parser.add_argument("--include-unverified", action="store_true")
     args = parser.parse_args(argv)
 
-    os.chdir(BACKEND_DIR)  # workspaces/ is relative to the backend folder
+    import db
+    import documents
     import main
-    from workspace import db_path, embedding_model_for, get_user_api_key
+    import settings
+    from providers import make_embedder
 
     questions = load_questions(ids=set(args.ids.split(",")) if args.ids else None,
                                only_verified=not args.include_unverified)
     if not questions:
         sys.exit("No questions to run (are they marked verified=yes?).")
-    persist_directory = db_path(args.user)
-    if persist_directory is None:
-        sys.exit(f"No database for user '{args.user}'. Build or re-index it first.")
-
-    embedding_model = embedding_model_for(args.user)
-    db = main.open_vector_store(persist_directory, embedding_model)
-    mode = args.retrieval or main.RETRIEVAL_MODE
-    keyword_index = None if mode == "vector" and not args.compare else main.get_keyword_index(persist_directory)
+    with db.connect() as conn:
+        user_id = resolve_user(conn, args.user)
+        key = documents.get_api_key(conn, user_id)
+        n_chunks, models = conn.execute(
+            "select count(*), string_agg(distinct d.embedding_model, ', ') from tt_chunks c "
+            "join tt_documents d on d.id = c.document_id where c.user_id = %s", [user_id]).fetchone()
+    if not n_chunks:
+        sys.exit(f"Nothing is indexed for '{args.user}'. Upload and index PDFs first.")
+    if not key and settings.EMBEDDINGS != "fake":
+        sys.exit(f"'{args.user}' has no Gemini API key saved (Settings in the app).")
+    embedding_model = models or "unknown"
+    retriever = DbRetriever(user_id, make_embedder(key))
+    mode = args.retrieval or settings.RETRIEVAL_MODE
 
     if args.compare:
-        return compare_modes(questions, db, keyword_index, args.k or main.TOP_K, persist_directory, embedding_model)
+        return compare_modes(questions, retriever, args.k or settings.TOP_K, args.user, embedding_model)
 
-    answer_model = args.model or main.LLM_MODEL
+    answer_model = args.model or settings.GEMINI_MODEL
     llm = judge = None
     if not args.retrieval_only:
-        key = get_user_api_key(args.user)
-        if not key:
-            sys.exit(f"No GEMINI_API_KEY in workspaces/{args.user}/.env (or use --retrieval-only).")
         llm = main.make_llm(key, answer_model)
         judge = main.make_llm(key, args.judge_model)
 
@@ -439,10 +442,10 @@ def main_cli(argv=None):
         print(f"Resuming {os.path.basename(out_dir)}: {len(done)} done, {len(questions)} to go.")
     else:
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        config = {"timestamp": stamp, "user": args.user, "db": os.path.basename(persist_directory),
+        config = {"timestamp": stamp, "user": args.user, "chunks": n_chunks,
                   "model": answer_model if llm else "none (retrieval only)",
                   "judge_model": args.judge_model if llm else None,
-                  "embedding_model": embedding_model, "retrieval": mode, "k": args.k or main.TOP_K}
+                  "embedding_model": embedding_model, "retrieval": mode, "k": args.k or settings.TOP_K}
         out_dir = os.path.join(RESULTS_DIR, f"{stamp}_{answer_model if llm else 'retrieval'}")
     config["planned"] = len(previous) + len(questions)
 
@@ -453,11 +456,11 @@ def main_cli(argv=None):
             results.append(res)
         write_report(results, summarize(results), config, out_dir)
 
-    print(f"Running {len(questions)} questions against {persist_directory} "
+    print(f"Running {len(questions)} questions against {args.user}'s {n_chunks} indexed passages "
           f"(retrieval: {config.get('retrieval', mode)}; "
           f"{'no answers' if llm is None else f'answers: {answer_model}, judge: {args.judge_model}'})\n")
-    evaluate(questions, db, llm, judge, k=config["k"], delay=args.delay if llm else 0, on_result=save,
-             keyword_index=keyword_index, mode=config.get("retrieval", mode))
+    evaluate(questions, retriever, llm, judge, k=config["k"], delay=args.delay if llm else 0, on_result=save,
+             mode=config.get("retrieval", mode))
     save()
     summary = summarize(results)
 

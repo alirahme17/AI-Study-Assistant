@@ -83,14 +83,11 @@ def test_with_retry_retries_rate_limits_only(monkeypatch):
         pass
 
 
-class FakeStore:
-    DOCS = [doc("Radar/other.pdf", 1), doc("Radar/c1.pdf", 13)]
+DOCS = [doc("Radar/other.pdf", 1), doc("Radar/c1.pdf", 13)]
 
-    def similarity_search(self, query, k, filter=None):
-        return self.DOCS[:k]
 
-    def get(self, include):
-        return {"documents": [d.page_content for d in self.DOCS], "metadatas": [d.metadata for d in self.DOCS]}
+def fake_retriever(question, course, k, mode):
+    return DOCS[:k]
 
 
 class FakeLLM:
@@ -107,7 +104,7 @@ class FakeLLM:
 def test_end_to_end_with_fakes(tmp_path):
     write_csv(tmp_path / "q.csv", ROWS)
     qs = run_eval.load_questions(str(tmp_path / "q.csv"))
-    results = run_eval.evaluate(qs, FakeStore(), FakeLLM(), FakeLLM(), k=5, log=lambda *_: None, mode="vector")
+    results = run_eval.evaluate(qs, fake_retriever, FakeLLM(), FakeLLM(), k=5, log=lambda *_: None, mode="vector")
     summary = run_eval.summarize(results)
 
     assert summary["hit_at_k"] == 1.0 and summary["mrr"] == 0.5
@@ -125,7 +122,7 @@ def test_end_to_end_with_fakes(tmp_path):
 
 def test_retrieval_only_mode_makes_no_llm_calls(tmp_path):
     write_csv(tmp_path / "q.csv", ROWS)
-    results = run_eval.evaluate(run_eval.load_questions(str(tmp_path / "q.csv")), FakeStore(), None, None,
+    results = run_eval.evaluate(run_eval.load_questions(str(tmp_path / "q.csv")), fake_retriever, None, None,
                                 k=1, log=lambda *_: None, mode="vector")
     summary = run_eval.summarize(results)
     assert summary["hit_at_k"] == 0.0 and summary["file_hit_at_k"] == 0.0
@@ -182,7 +179,7 @@ def test_quota_stops_run_cleanly_and_keeps_finished_results(tmp_path):
     write_csv(tmp_path / "q.csv", rows)
     saved = []
     llm = QuotaAfter(3)  # q01: answer+judge, q02: answer, then quota on q02's judge
-    results = run_eval.evaluate(run_eval.load_questions(str(tmp_path / "q.csv")), FakeStore(), llm, llm,
+    results = run_eval.evaluate(run_eval.load_questions(str(tmp_path / "q.csv")), fake_retriever, llm, llm,
                                 k=5, log=lambda *_: None, on_result=saved.append, mode="vector")
     assert [r["id"] for r in results] == ["q01"] and saved == results
 
@@ -204,22 +201,29 @@ def test_message_text_does_not_call_text_property_strings():
     assert message_text(Msg()) == "hello"
 
 
-def test_cli_stops_on_quota_then_resume_finishes_same_run(tmp_path, monkeypatch):
+def _db_user(monkeypatch, tmp_path, rows):
+    """A dev user 'ali' with two indexed chunks and a saved key; eval paths in tmp_path."""
+    import db
+    import documents
+    from auth import dev_user_id
+    from test_search import add_chunks
+    write_csv(tmp_path / "q.csv", rows)
+    user_id = dev_user_id("ali")
+    add_chunks(user_id, [("Radar", "other.pdf", 1, "Unrelated text about antennas"),
+                         ("Radar", "c1.pdf", 13, "What is radar? Radar is radio detection and ranging")])
+    with db.connect() as conn:
+        documents.save_api_key(conn, user_id, "KEY")
+    monkeypatch.setattr(run_eval, "QUESTIONS_CSV", str(tmp_path / "q.csv"))
+    monkeypatch.setattr(run_eval, "RESULTS_DIR", str(tmp_path / "results"))
+
+
+def test_cli_stops_on_quota_then_resume_finishes_same_run(tmp_path, monkeypatch, database):
     import main
-    from workspace import STATUS_READY, save_user_api_key, write_status
+    import settings
 
     rows = [dict(ROWS[0], id=f"q{i:02d}") for i in range(1, 4)] + [ROWS[1]]
     rows[-1] = dict(rows[-1], id="q04")
-    write_csv(tmp_path / "q.csv", rows)
-    save_user_api_key("ali", "KEY")
-    (tmp_path / "workspaces" / "ali" / "chroma_db_x").mkdir(parents=True)
-    write_status("ali", STATUS_READY, db_dir="chroma_db_x")
-
-    monkeypatch.setattr(run_eval, "BACKEND_DIR", str(tmp_path))
-    monkeypatch.setattr(run_eval, "QUESTIONS_CSV", str(tmp_path / "q.csv"))
-    monkeypatch.setattr(run_eval, "RESULTS_DIR", str(tmp_path / "results"))
-    monkeypatch.setattr(main, "open_vector_store", lambda path, *args: FakeStore())
-    main.get_keyword_index.cache_clear()
+    _db_user(monkeypatch, tmp_path, rows)
     models = []
 
     def make_llm(key, model=None):
@@ -229,10 +233,11 @@ def test_cli_stops_on_quota_then_resume_finishes_same_run(tmp_path, monkeypatch)
 
     llm = QuotaAfter(2)                       # day 1: only q01 fits in the quota
     run_eval.main_cli(["--user", "ali", "--delay", "0"])
-    assert models[-1] == "gemini-3.5-flash-lite" and models[-2] == main.LLM_MODEL   # judge on its own model
+    assert models[-1] == "gemini-3.5-flash-lite" and models[-2] == settings.GEMINI_MODEL   # judge on its own model
     run_dir = run_eval.latest_run_dir()
     first = json.loads(open(os.path.join(run_dir, "results.json"), encoding="utf-8").read())
     assert [r["id"] for r in first["results"]] == ["q01"] and first["config"]["planned"] == 4
+    assert first["results"][0]["retrieval"]["hit"]
 
     llm = QuotaAfter(100)                     # day 2: quota reset
     run_eval.main_cli(["--user", "ali", "--resume", "--delay", "0"])
@@ -243,24 +248,23 @@ def test_cli_stops_on_quota_then_resume_finishes_same_run(tmp_path, monkeypatch)
     assert "Partial run" not in open(os.path.join(run_dir, "report.md"), encoding="utf-8").read()
 
 
-def test_compare_mode_writes_side_by_side_report(tmp_path, monkeypatch):
+def test_compare_mode_writes_side_by_side_report(tmp_path, monkeypatch, database):
     import main
-    from workspace import STATUS_READY, write_status
-
-    write_csv(tmp_path / "q.csv", ROWS)
-    (tmp_path / "workspaces" / "ali" / "chroma_db_x").mkdir(parents=True)
-    write_status("ali", STATUS_READY, db_dir="chroma_db_x")
-    monkeypatch.setattr(run_eval, "BACKEND_DIR", str(tmp_path))
-    monkeypatch.setattr(run_eval, "QUESTIONS_CSV", str(tmp_path / "q.csv"))
-    monkeypatch.setattr(run_eval, "RESULTS_DIR", str(tmp_path / "results"))
-    monkeypatch.setattr(main, "open_vector_store", lambda path, *args: FakeStore())
-    main.get_keyword_index.cache_clear()
+    _db_user(monkeypatch, tmp_path, ROWS)
     monkeypatch.setattr(main, "make_llm", lambda *a: (_ for _ in ()).throw(AssertionError("no LLM in compare")))
 
     summaries = run_eval.main_cli(["--user", "ali", "--compare"])
-    assert set(summaries) == {"vector", "bm25", "hybrid"}
-    assert summaries["vector"]["hit_at_k"] == 1.0
+    assert set(summaries) == {"vector", "keyword", "hybrid"}
+    assert all(summaries[m]["hit_at_k"] == 1.0 for m in summaries)
     run_dir = [d for d in os.listdir(tmp_path / "results") if d.endswith("_compare")][0]
     report = open(tmp_path / "results" / run_dir / "report.md", encoding="utf-8").read()
-    assert "| Metric | vector | bm25 | hybrid |" in report
+    assert "| Metric | vector | keyword | hybrid |" in report
     assert run_eval.latest_run_dir() is None        # --resume never picks a comparison folder
+
+
+def test_unknown_or_empty_user_exits_cleanly(tmp_path, monkeypatch, database):
+    import pytest
+    write_csv(tmp_path / "q.csv", ROWS)
+    monkeypatch.setattr(run_eval, "QUESTIONS_CSV", str(tmp_path / "q.csv"))
+    with pytest.raises(SystemExit, match="Nothing is indexed"):
+        run_eval.main_cli(["--user", "nobody"])

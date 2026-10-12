@@ -1,21 +1,45 @@
-"""Keyword search (BM25), rank fusion and hybrid retrieval."""
-from langchain_core.documents import Document
+"""Hybrid retrieval in Postgres: vector (pgvector) + keyword (full text) + RRF fusion."""
+import uuid
 
-import main
-from search import KeywordIndex, rrf_fuse, search, tokenize
+import pytest
 
+import db
+from providers import FakeEmbedder
+from search import keyword_search, rrf_fuse, search, tokenize, vector_search
 
-def doc(text, source="Radar/c1.pdf", page=1, course="Radar", chunk=0):
-    return Document(page_content=text, metadata={"source": source, "page": page, "course": course, "chunk_index": chunk})
-
+ALICE, BOB = str(uuid.uuid4()), str(uuid.uuid4())
 
 CORPUS = [
-    doc("DSDV is a table driven protocol based on Bellman-Ford using hop count", "WN/ch3.pdf", 13, "Wireless"),
-    doc("AODV discovers routes on demand with RREQ and RREP packets", "WN/ch3.pdf", 25, "Wireless"),
-    doc("La bande passante d'une antenne: transfert d'énergie maximal", "Ant/p2.pdf", 10, "Antenna"),
-    doc("Radar range equation with system losses and propagation losses", "Radar/c2.pdf", 22, "Radar"),
-    doc("The radar transmits a pulse and measures the round-trip time", "Radar/c1.pdf", 16, "Radar"),
+    ("Wireless", "ch3.pdf", 13, "DSDV is a table driven protocol based on Bellman-Ford using hop count"),
+    ("Wireless", "ch3.pdf", 25, "AODV discovers routes on demand with RREQ and RREP packets"),
+    ("Antenna", "p2.pdf", 10, "La bande passante d'une antenne: transfert d'énergie maximal"),
+    ("Radar", "c2.pdf", 22, "Radar range equation with system losses and propagation losses"),
+    ("Radar", "c1.pdf", 16, "The radar transmits a pulse and measures the round-trip time"),
 ]
+
+
+def add_chunks(user_id, rows, embedder=None):
+    embedder = embedder or FakeEmbedder()
+    with db.connect() as conn:
+        for course, name, page, text in rows:
+            doc_id = conn.execute(
+                "insert into tt_documents (user_id, course, name, storage_path, status) values (%s, %s, %s, '', 'ready') "
+                "on conflict (user_id, course, name) do update set status = 'ready' returning id",
+                [user_id, course, name]).fetchone()[0]
+            conn.execute(
+                "insert into tt_chunks (user_id, document_id, course, page, chunk_index, content, embedding) "
+                "values (%s, %s, %s, %s, 0, %s, %s::vector)",
+                [user_id, doc_id, course, page, text, db.vector_literal(embedder.embed_documents([text])[0])])
+
+
+@pytest.fixture
+def corpus(database):
+    add_chunks(ALICE, CORPUS)
+    add_chunks(BOB, [("Radar", "secret.pdf", 1, "Bob's private radar notes about DSDV")])
+
+
+def pages(docs):
+    return [(d.metadata["source"], d.metadata["page"]) for d in docs]
 
 
 def test_tokenize_strips_accents_case_and_stopwords():
@@ -23,63 +47,60 @@ def test_tokenize_strips_accents_case_and_stopwords():
     assert tokenize("802.11 uses 14 channels") == ["802", "11", "uses", "14", "channels"]
 
 
-def test_bm25_finds_exact_technical_terms():
-    index = KeywordIndex(CORPUS)
-    assert index.search("What metric does DSDV use?", 1)[0].metadata["page"] == 13
-    assert index.search("energie bande passante", 1)[0].metadata["source"] == "Ant/p2.pdf"   # accent-insensitive
+def test_keyword_search_finds_exact_technical_terms(corpus):
+    with db.connect() as conn:
+        hits = keyword_search(conn, ALICE, "What metric does DSDV use?", 3)
+    assert pages(hits)[0] == ("Wireless/ch3.pdf", 13)
 
 
-def test_bm25_respects_course_filter_and_skips_zero_scores():
-    index = KeywordIndex(CORPUS)
-    hits = index.search("radar losses", 5, course="Radar")
-    assert hits and all(h.metadata["course"] == "Radar" for h in hits)
-    assert index.search("radar losses", 5, course="Wireless") == []
-    assert index.search("quantum chromodynamics", 5) == []
+def test_keyword_search_ignores_accents_and_ranks_rare_terms_first(corpus):
+    with db.connect() as conn:
+        hits = keyword_search(conn, ALICE, "Quelle est la bande passante en ENERGIE ?", 5)
+        # "radar" appears in two chunks, "pulse" in one: the rarer word decides.
+        pulse = keyword_search(conn, ALICE, "radar pulse", 5)
+    assert pages(hits)[0] == ("Antenna/p2.pdf", 10)
+    assert pages(pulse)[0] == ("Radar/c1.pdf", 16)
 
 
-def test_empty_index_and_empty_query():
-    assert KeywordIndex([]).search("anything", 3) == []
-    assert KeywordIndex(CORPUS).search("the of and", 3) == []    # only stop-words
+def test_search_is_scoped_to_the_user_and_course(corpus):
+    with db.connect() as conn:
+        alice = keyword_search(conn, ALICE, "DSDV radar", 10)
+        bob = keyword_search(conn, BOB, "DSDV", 10)
+        radar_only = keyword_search(conn, ALICE, "DSDV radar", 10, course="Radar")
+        vector = vector_search(conn, ALICE, FakeEmbedder().embed_query("DSDV"), 10)
+    assert "Radar/secret.pdf" not in {s for s, _ in pages(alice) + pages(vector)}
+    assert pages(bob) == [("Radar/secret.pdf", 1)]
+    assert {d.metadata["course"] for d in radar_only} == {"Radar"}
 
 
-def test_rrf_rewards_documents_ranked_well_in_both_lists():
-    a, b, c, d = CORPUS[:4]
-    fused = rrf_fuse([[a, b, c], [c, d, a]], k=2)
-    assert fused == [a, c]          # a: ranks 1 and 3, c: ranks 3 and 1 -> beat b and d (one list only)
+def test_queries_with_only_stopwords_or_unknown_words_return_nothing(corpus):
+    with db.connect() as conn:
+        assert keyword_search(conn, ALICE, "what is the", 5) == []
+        assert keyword_search(conn, ALICE, "zzzunknownword", 5) == []
+        assert keyword_search(conn, ALICE, "it's a 'quoted' & (weird) | query!", 5) == []
 
 
-class FakeVectorStore:
-    def __init__(self, docs):
-        self.docs, self.calls = docs, []
-
-    def similarity_search(self, query, k, filter=None):
-        self.calls.append((query, k, filter))
-        return self.docs[:k]
-
-    def get(self, include):
-        return {"documents": [d.page_content for d in CORPUS], "metadatas": [d.metadata for d in CORPUS]}
+def test_vector_search_orders_by_similarity(corpus):
+    with db.connect() as conn:
+        hits = vector_search(conn, ALICE, FakeEmbedder().embed_query("AODV RREQ RREP routes"), 2)
+    assert pages(hits)[0] == ("Wireless/ch3.pdf", 25)
 
 
-def test_hybrid_combines_vector_and_keyword_results():
-    store = FakeVectorStore([CORPUS[4], CORPUS[1]])          # vector search misses the DSDV page
-    index = KeywordIndex.from_chroma(store)
-    hits = search(store, index, "Which metric does DSDV use?", k=2, course=None, mode="hybrid")
-    assert CORPUS[0] in hits                                   # recovered by BM25
-    assert store.calls[0][1] == 2 * 4                          # vector search fetched extra candidates
+def test_hybrid_combines_both_lists(corpus):
+    with db.connect() as conn:
+        hits = search(conn, ALICE, FakeEmbedder(), "radar range equation losses", 3, mode="hybrid")
+        keyword = search(conn, ALICE, FakeEmbedder(), "radar range equation losses", 3, mode="bm25")
+    assert pages(hits)[0] == ("Radar/c2.pdf", 22)
+    assert pages(keyword)[0] == ("Radar/c2.pdf", 22)
+    with pytest.raises(ValueError):
+        with db.connect() as conn:
+            search(conn, ALICE, FakeEmbedder(), "x", 3, mode="nope")
 
 
-def test_modes_and_fallback_without_keyword_index():
-    store = FakeVectorStore([CORPUS[4]])
-    assert search(store, None, "DSDV", 1, mode="hybrid") == [CORPUS[4]]      # degrades to vector
-    assert search(store, KeywordIndex(CORPUS), "DSDV", 1, mode="bm25") == [CORPUS[0]]
-    assert store.calls[-1][2] is None
-    search(store, None, "x", 1, course="Radar", mode="vector")
-    assert store.calls[-1][2] == {"course": {"$eq": "Radar"}}
+def test_rrf_rewards_agreement():
+    from langchain_core.documents import Document
 
-
-def test_safe_keyword_index_falls_back_to_none(monkeypatch):
-    def broken(path):
-        raise RuntimeError("corrupt db")
-    main.get_keyword_index.cache_clear()
-    monkeypatch.setattr(main, "open_vector_store", broken)
-    assert main.safe_keyword_index("/nowhere") is None
+    def d(i):
+        return Document(page_content=str(i), metadata={"chunk_id": i})
+    fused = rrf_fuse([[d(1), d(2), d(3)], [d(3), d(4), d(1)]], k=2)
+    assert [x.metadata["chunk_id"] for x in fused] == [1, 3]
