@@ -14,10 +14,16 @@ class FakeLLM:
     def __init__(self, key):
         self.key = key
 
-    def stream(self, prompt):
+    def stream(self, messages):
         class Chunk:
             content = f"answered-with:{self.key}"
         yield Chunk()
+
+
+def answer_text(response) -> str:
+    import json
+    events = [json.loads(line) for line in response.text.splitlines() if line]
+    return "".join(e["text"] for e in events if e["type"] == "token")
 
 
 def _ready_user(tmp_path, username, key):
@@ -37,8 +43,8 @@ def test_each_user_gets_their_own_key(isolated_workspaces, monkeypatch):
     first = client.post("/api/query", json={"username": "alice", "question": "q"})
     second = client.post("/api/query", json={"username": "bob", "question": "q"})
 
-    assert first.text == "answered-with:KEY-ALICE"
-    assert second.text == "answered-with:KEY-BOB"  # was KEY-ALICE before the fix
+    assert answer_text(first) == "answered-with:KEY-ALICE"
+    assert answer_text(second) == "answered-with:KEY-BOB"  # was KEY-ALICE before the fix
 
 
 def test_key_is_not_leaked_into_process_environment(isolated_workspaces, monkeypatch):

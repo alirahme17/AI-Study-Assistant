@@ -2,9 +2,12 @@ import streamlit as st
 import streamlit_authenticator as stauth
 import yaml
 from yaml.loader import SafeLoader
-import requests
+import json
 import os
+import re
 import time
+
+import requests
 from typing import List, Generator
 
 # --- Page Config ---
@@ -48,19 +51,58 @@ def get_courses(api_url: str, username: str) -> List[str]:
     except requests.exceptions.RequestException:
         return ["Error: Could not fetch courses"]
 
-def stream_query_backend(question: str, api_url: str, username: str, course: str) -> Generator[str, None, None]:
-    payload = {"username": username, "question": question, "course": course}
+HISTORY_TURNS_TO_SEND = 6  # backend keeps at most the last 6 messages anyway
+_CITATION_RE = re.compile(r"\[(\d+(?:\s*,\s*\d+)*)\]")
+
+
+def stream_query_backend(question: str, api_url: str, username: str, course: str,
+                         history: List[dict], result: dict) -> Generator[str, None, None]:
+    """Yield answer text as it streams in; put the sources into result["sources"].
+
+    The backend sends newline-delimited JSON events: sources, token..., error?, done.
+    """
+    payload = {"username": username, "question": question, "course": course, "history": history}
     try:
-        with requests.post(f"{api_url}/api/query", json=payload, stream=True, timeout=60) as resp:
-            if resp.status_code == 200:
-                for chunk in resp.iter_content(chunk_size=None):
-                    if chunk:
-                        yield chunk.decode('utf-8')
-            else:
-                error_message = f"**Error:** Backend responded with status {resp.status_code}. {resp.text[:300]}"
-                yield error_message
+        with requests.post(f"{api_url}/api/query", json=payload, stream=True, timeout=120) as resp:
+            if resp.status_code != 200:
+                yield f"**Error:** Backend responded with status {resp.status_code}. {resp.text[:300]}"
+                return
+            for line in resp.iter_lines(decode_unicode=True):
+                if not line:
+                    continue
+                event = json.loads(line)
+                if event["type"] == "sources":
+                    result["sources"] = event["sources"]
+                elif event["type"] == "token":
+                    yield event["text"]
+                elif event["type"] == "error":
+                    yield f"\n\n**Error:** {event['message']}"
     except requests.exceptions.RequestException as e:
         yield f"**Error:** Failed to connect to backend: {e}"
+
+
+def cited_ids(answer: str) -> List[int]:
+    seen = []
+    for group in _CITATION_RE.findall(answer or ""):
+        for n in group.split(","):
+            if int(n) not in seen:
+                seen.append(int(n))
+    return seen
+
+
+def render_sources(answer: str, sources: List[dict]) -> None:
+    """Show the sources the answer cited (or all retrieved ones if it cited none)."""
+    if not sources:
+        return
+    cited = [n for n in cited_ids(answer) if any(s["id"] == n for s in sources)]
+    shown = [s for n in cited for s in sources if s["id"] == n] if cited else sources
+    title = f"Sources ({len(shown)})" if cited else f"Retrieved passages ({len(shown)}) — none cited"
+    with st.expander(title, expanded=False):
+        for src in shown:
+            page = f" — page {src['page']}" if src.get("page") else ""
+            st.markdown(f"**[{src['id']}]** `{src['source']}`{page}")
+            if src.get("snippet"):
+                st.caption(src["snippet"] + "…")
 
 
 # --- Main Application Logic ---
@@ -134,8 +176,21 @@ else:
     # --- MAIN CHAT UI ---
     st.title(f"Teleco-Tutor for {name}")
     if "messages" not in st.session_state:
-        st.session_state.messages = [{"role": "assistant", "content": "Hello! Select a course and ask a question."}]
-    
+        st.session_state.messages = []  # [{"role", "content", "sources"?}]
+
+    with st.sidebar:
+        if st.button("🆕 New chat", use_container_width=True):
+            st.session_state.messages = []
+            st.rerun()
+        if st.button("🔄 Re-index my PDFs", use_container_width=True,
+                     help="Rebuild your knowledge base from the PDFs already downloaded "
+                          "(needed once to get page numbers in citations)."):
+            resp = requests.post(f"{API_URL}/api/rebuild/{username}", timeout=30)
+            if resp.status_code == 200:
+                st.rerun()
+            else:
+                st.error(resp.json().get("detail", resp.text))
+
     courses = get_courses(API_URL, username)
     tabs = st.tabs(["Course", "Chat"])
     with tabs[0]:
@@ -145,12 +200,27 @@ else:
             st.session_state.course = st.selectbox("Course", courses, help="Select the course to search within.")
         st.info(f"Current course: **{st.session_state.get('course', 'None')}**")
     with tabs[1]:
+        if not st.session_state.messages:
+            st.chat_message("assistant").write(
+                "Hello! Select a course and ask a question. I'll cite the PDF and page for every answer, "
+                "and you can ask follow-up questions."
+            )
         for msg in st.session_state.messages:
-            st.chat_message(msg["role"]).write(msg["content"])
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+                if msg["role"] == "assistant":
+                    render_sources(msg["content"], msg.get("sources", []))
+
         if user_msg := st.chat_input(f"Ask a question about {st.session_state.get('course', '...')}…"):
+            # History = the turns BEFORE this question, without the sources payload.
+            history = [{"role": m["role"], "content": m["content"]}
+                       for m in st.session_state.messages][-HISTORY_TURNS_TO_SEND:]
             st.session_state.messages.append({"role": "user", "content": user_msg})
-            st.chat_message("user").write(user_msg)
+            st.chat_message("user").markdown(user_msg)
             with st.chat_message("assistant"):
-                response_generator = stream_query_backend(user_msg, API_URL, username, st.session_state.get('course'))
-                full_response = st.write_stream(response_generator)
-            st.session_state.messages.append({"role": "assistant", "content": full_response})
+                result = {"sources": []}
+                full_response = st.write_stream(stream_query_backend(
+                    user_msg, API_URL, username, st.session_state.get("course"), history, result))
+                render_sources(full_response, result["sources"])
+            st.session_state.messages.append(
+                {"role": "assistant", "content": full_response, "sources": result["sources"]})

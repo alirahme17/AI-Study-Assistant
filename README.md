@@ -10,6 +10,8 @@ Teleco-Tutor is a full-stack, multi-user web application that allows users to tr
   * **Bring Your Own Key:** Users provide their own Gemini API key for secure and personalized access to the LLM.
   * **Interactive UI:** A polished, multi-page Streamlit application provides a seamless user experience from signup and configuration to the final chat interface.
   * **Real-Time Responses:** The chatbot streams answers token-by-token for a responsive and engaging user experience.
+  * **Source Citations with Page Numbers:** Every claim is cited like `[1]`, and each answer lists the exact PDF and page it came from, with a preview of the passage.
+  * **Conversation Memory:** Ask follow-ups ("and what about its range?"). The question is rewritten into a standalone search query using the recent conversation, and the model sees the last few turns.
 
 -----
 
@@ -17,7 +19,7 @@ Teleco-Tutor is a full-stack, multi-user web application that allows users to tr
 
   * **Backend:** Python, FastAPI, Uvicorn
   * **Frontend:** Streamlit, Streamlit-Authenticator
-  * **AI/ML:** LangChain, Google Gemini 1.5 Flash, Sentence-Transformers, PyMuPDF
+  * **AI/ML:** LangChain, Google Gemini (default `gemini-3.8-flash`, configurable), Sentence-Transformers, PyMuPDF
   * **Database:** ChromaDB (Vector Store)
   * **APIs & Auth:** Google Drive API, Google OAuth
 
@@ -120,6 +122,9 @@ uvicorn main:app --reload
 
 The backend will be running at `http://127.0.0.1:8000`.
 
+To use a different Gemini model, set `GEMINI_MODEL` before starting the backend, e.g. in PowerShell:
+`$env:GEMINI_MODEL="gemini-3.5-flash-lite"` (cheaper and faster).
+
 ### \#\#\# Terminal 2: Start the Frontend
 
 ```bash
@@ -151,3 +156,6 @@ The tests fake Google Drive and Gemini, so they need no API keys or internet acc
 4.  You will be prompted with a **one-time setup screen**. Provide the URL of your Google Drive folder and your Gemini API key.
 5.  Click "Build My Knowledge Base" and wait for the system to process your documents.
 6.  Once complete, the app will reload, and you can navigate to the **Chat** page to start asking questions\!
+7.  Click **Sources** under an answer to see which PDF and page each `[n]` refers to. Use **New chat** in the sidebar to start a fresh conversation.
+
+> **Upgrading an existing knowledge base:** databases built before page-level indexing still work, but citations show only the file name. Click **Re-index my PDFs** in the sidebar once to add page numbers (no Google Drive access needed).

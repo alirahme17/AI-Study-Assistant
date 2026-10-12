@@ -1,7 +1,8 @@
+import json
 import os
 import threading
 from functools import lru_cache
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
@@ -9,6 +10,7 @@ from pydantic import BaseModel
 
 from build_database import EMBEDDING_MODEL, build_user_database, remove_old_databases
 from ingest import extract_folder_id, ingest_drive_data
+from rag import build_messages, condense_question, message_text, number_sources, trim_history
 from workspace import (
     STATUS_ERROR,
     STATUS_PROCESSING,
@@ -24,7 +26,10 @@ from workspace import (
 
 app = FastAPI()
 
-LLM_MODEL = "gemini-1.5-flash"
+# Gemini 1.5/2.0 models are shut down. Override with the GEMINI_MODEL env var,
+# e.g. GEMINI_MODEL=gemini-3.5-flash-lite for a cheaper, faster model.
+LLM_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+TOP_K = 5
 
 # Pipelines running in THIS server process. If status.json says "processing"
 # but the user isn't in here, the server was restarted mid-build and that
@@ -39,10 +44,16 @@ class ConfigurePayload(BaseModel):
     gemini_api_key: str
 
 
+class ChatMessage(BaseModel):
+    role: str       # "user" or "assistant"
+    content: str
+
+
 class QueryPayload(BaseModel):
     username: str
     question: str
     course: Optional[str] = None
+    history: List[ChatMessage] = []   # previous turns of this chat, oldest first
 
 
 def _checked_username(username: str) -> str:
@@ -69,21 +80,26 @@ def make_llm(api_key: str):
     return ChatGoogleGenerativeAI(model=LLM_MODEL, google_api_key=api_key)
 
 
-def run_data_pipeline(username: str, drive_folder_id: str):
+def run_data_pipeline(username: str, drive_folder_id: Optional[str]):
     """Long-running ingestion + indexing, run in a background thread.
 
+    drive_folder_id=None re-indexes the PDFs already downloaded (no Drive access).
     Always ends in either "ready" or "error" — never stays "processing".
     """
     try:
-        write_status(username, STATUS_PROCESSING, "Downloading PDFs from Google Drive...")
-        pdf_count = ingest_drive_data(username, drive_folder_id)
-        if pdf_count == 0:
-            raise RuntimeError("No PDFs were found in that Google Drive folder.")
+        if drive_folder_id is not None:
+            write_status(username, STATUS_PROCESSING, "Downloading PDFs from Google Drive...")
+            pdf_count = ingest_drive_data(username, drive_folder_id)
+            if pdf_count == 0:
+                raise RuntimeError("No PDFs were found in that Google Drive folder.")
+            label = f"{pdf_count} PDF(s)"
+        else:
+            label = "your downloaded PDFs"
 
-        write_status(username, STATUS_PROCESSING, f"Indexing {pdf_count} PDF(s)...")
+        write_status(username, STATUS_PROCESSING, f"Indexing {label}...")
         new_db_dir = build_user_database(username)
 
-        write_status(username, STATUS_READY, f"Indexed {pdf_count} PDF(s).", db_dir=new_db_dir)
+        write_status(username, STATUS_READY, f"Indexed {label}.", db_dir=new_db_dir)
         remove_old_databases(username, keep_dir=new_db_dir)
         print(f"Data pipeline for user '{username}' completed successfully.")
     except Exception as e:
@@ -92,6 +108,22 @@ def run_data_pipeline(username: str, drive_folder_id: str):
     finally:
         with _running_lock:
             _running.discard(username)
+
+
+def _start_pipeline(username: str, drive_folder_id: Optional[str]) -> None:
+    with _running_lock:
+        if username in _running:
+            raise HTTPException(status_code=409, detail="Your knowledge base is already being built.")
+        _running.add(username)
+    try:
+        write_status(username, STATUS_PROCESSING, "Starting...")
+        threading.Thread(
+            target=run_data_pipeline, args=(username, drive_folder_id), daemon=True
+        ).start()
+    except Exception:
+        with _running_lock:
+            _running.discard(username)
+        raise
 
 
 @app.post("/api/configure")
@@ -104,22 +136,19 @@ def configure_workspace(payload: ConfigurePayload):
     if not payload.gemini_api_key.strip():
         raise HTTPException(status_code=400, detail="Gemini API key is empty.")
 
-    with _running_lock:
-        if username in _running:
-            raise HTTPException(status_code=409, detail="Your knowledge base is already being built.")
-        _running.add(username)
-
-    try:
-        save_user_api_key(username, payload.gemini_api_key.strip())
-        write_status(username, STATUS_PROCESSING, "Starting...")
-        threading.Thread(
-            target=run_data_pipeline, args=(username, drive_folder_id), daemon=True
-        ).start()
-    except Exception:
-        with _running_lock:
-            _running.discard(username)
-        raise
+    save_user_api_key(username, payload.gemini_api_key.strip())
+    _start_pipeline(username, drive_folder_id)
     return {"message": f"Configuration received for '{username}'. Data processing started."}
+
+
+@app.post("/api/rebuild/{username}")
+def rebuild_index(username: str):
+    """Re-index the PDFs already downloaded, e.g. after an indexing upgrade (page numbers)."""
+    username = _checked_username(username)
+    if not os.path.isdir(data_path(username)):
+        raise HTTPException(status_code=404, detail="No downloaded PDFs found. Please run setup first.")
+    _start_pipeline(username, None)
+    return {"message": "Re-indexing started."}
 
 
 @app.get("/api/status/{username}")
@@ -147,8 +176,20 @@ def get_courses(username: str):
         return {"courses": []}
 
 
+def _event(kind: str, **data) -> str:
+    """One line of newline-delimited JSON (NDJSON)."""
+    return json.dumps({"type": kind, **data}, ensure_ascii=False) + "\n"
+
+
 @app.post("/api/query")
 def query_database(payload: QueryPayload):
+    """Answer a question with citations, streamed as NDJSON events:
+
+        {"type": "sources", "sources": [{"id": 1, "source": ..., "page": 3, ...}, ...]}
+        {"type": "token",   "text": "Radar range depends on [1] ..."}   (many)
+        {"type": "error",   "message": "..."}                          (only on failure)
+        {"type": "done"}
+    """
     username = _checked_username(payload.username)
 
     persist_directory = db_path(username)
@@ -160,23 +201,31 @@ def query_database(payload: QueryPayload):
     if not api_key:
         raise HTTPException(status_code=400, detail="Gemini API key not found for this user.")
 
-    db = open_vector_store(persist_directory)
-    llm = make_llm(api_key)
+    history = trim_history([m.model_dump() for m in payload.history])
 
-    search_kwargs = {"k": 4}
-    if payload.course:
-        search_kwargs["filter"] = {"course": {"$eq": payload.course}}
-
-    retrieved_docs = db.similarity_search(query=payload.question, **search_kwargs)
-    context = "\n\n".join(doc.page_content for doc in retrieved_docs)
-
-    prompt_template = f"Answer based only on the context provided.\n\nContext:\n{context}\n\nQuestion:\n{payload.question}"
-
-    def stream_generator():
+    def stream_events():
         try:
-            for chunk in llm.stream(prompt_template):
-                yield chunk.content
-        except Exception as e:
-            yield f"Error during response generation: {str(e)}"
+            llm = make_llm(api_key)
+            db = open_vector_store(persist_directory)
 
-    return StreamingResponse(stream_generator(), media_type="text/plain")
+            # Memory, step 1: make follow-ups ("what about its range?") searchable.
+            search_query = condense_question(llm, payload.question, history)
+
+            search_kwargs = {"k": TOP_K}
+            if payload.course:
+                search_kwargs["filter"] = {"course": {"$eq": payload.course}}
+            docs = db.similarity_search(query=search_query, **search_kwargs)
+
+            context, sources = number_sources(docs)
+            yield _event("sources", sources=sources, search_query=search_query)
+
+            # Memory, step 2: the model sees the recent conversation too.
+            for chunk in llm.stream(build_messages(payload.question, context, history)):
+                text = message_text(chunk)
+                if text:
+                    yield _event("token", text=text)
+        except Exception as e:
+            yield _event("error", message=f"{type(e).__name__}: {e}")
+        yield _event("done")
+
+    return StreamingResponse(stream_events(), media_type="application/x-ndjson")
