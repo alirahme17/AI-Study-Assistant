@@ -71,7 +71,7 @@ def vector_search(conn, user_id, query_vector: List[float], k: int, course: Opti
     vec = vector_literal(query_vector)
     rows = conn.execute(
         f"select {_COLUMNS} from tt_chunks c join tt_documents d on d.id = c.document_id "
-        f"where {where} order by c.embedding <=> %s::vector limit %s",
+        f"where {where} order by c.embedding OPERATOR(extensions.<=>) %s::extensions.vector limit %s",
         [*params, vec, k]).fetchall()
     return [_to_doc(r) for r in rows]
 

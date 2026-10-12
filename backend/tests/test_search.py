@@ -28,7 +28,7 @@ def add_chunks(user_id, rows, embedder=None):
                 [user_id, course, name]).fetchone()[0]
             conn.execute(
                 "insert into tt_chunks (user_id, document_id, course, page, chunk_index, content, embedding) "
-                "values (%s, %s, %s, %s, 0, %s, %s::vector)",
+                "values (%s, %s, %s, %s, 0, %s, %s::extensions.vector)",
                 [user_id, doc_id, course, page, text, db.vector_literal(embedder.embed_documents([text])[0])])
 
 

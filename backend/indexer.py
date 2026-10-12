@@ -81,7 +81,7 @@ def index_document(doc, embedder, ocr, progress: Callable[[str], None]) -> dict:
             with conn.cursor() as cur:
                 cur.executemany(
                     """insert into tt_chunks (user_id, document_id, course, page, chunk_index, content, ocr, embedding)
-                       select user_id, id, course, %s, %s, %s, %s, %s::vector from tt_documents where id = %s""",
+                       select user_id, id, course, %s, %s, %s, %s, %s::extensions.vector from tt_documents where id = %s""",
                     [(c.page, c.chunk_index, c.content, c.ocr, db.vector_literal(v), doc_id)
                      for c, v in zip(pdf.chunks, vectors)])
             updated = conn.execute(

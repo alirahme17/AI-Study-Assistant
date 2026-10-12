@@ -1,7 +1,8 @@
 """Postgres access: a small connection pool and helpers.
 
-Every connection gets `search_path = public, extensions`, where Supabase keeps
-pgvector, so the `<=>` operator and the `vector` type resolve.
+Queries name pgvector's type and operator with their schema (extensions.vector,
+OPERATOR(extensions.<=>)), because Supabase's transaction pooler doesn't keep
+session settings such as search_path between transactions.
 """
 import os
 from contextlib import contextmanager
@@ -12,17 +13,12 @@ import settings
 SCHEMA_FILE = os.path.join(os.path.dirname(__file__), "schema.sql")
 
 
-def _configure(conn):
-    conn.execute("set search_path = public, extensions")
-    conn.commit()
-
-
 @lru_cache(maxsize=1)
 def pool():
     import atexit
     from psycopg_pool import ConnectionPool
     # Small pool: the free host has 512 MB, and Supabase's pooler limits connections.
-    p = ConnectionPool(settings.DATABASE_URL, min_size=1, max_size=4, configure=_configure,
+    p = ConnectionPool(settings.DATABASE_URL, min_size=1, max_size=4,
                        kwargs={"prepare_threshold": None},  # the Supabase transaction pooler forbids prepared statements
                        open=True)
     atexit.register(p.close)
@@ -37,6 +33,7 @@ def connect():
 
 
 def apply_schema(conn) -> None:
+    """Create/upgrade the tables (idempotent)."""
     with open(SCHEMA_FILE, encoding="utf-8") as f:
         conn.execute(f.read())
     conn.commit()
