@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from build_database import EMBEDDING_MODEL, build_user_database, remove_old_databases
 from ingest import extract_folder_id, ingest_drive_data
 from rag import build_messages, condense_question, message_text, number_sources, trim_history
+from search import KeywordIndex, search
 from workspace import (
     STATUS_ERROR,
     STATUS_PROCESSING,
@@ -30,6 +31,8 @@ app = FastAPI()
 # e.g. GEMINI_MODEL=gemini-3.5-flash-lite for a cheaper, faster model.
 LLM_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 TOP_K = 5
+# "hybrid" (keyword BM25 + vector, fused), "vector" (embeddings only) or "bm25" (keywords only).
+RETRIEVAL_MODE = os.getenv("RETRIEVAL_MODE", "hybrid")
 
 # Pipelines running in THIS server process. If status.json says "processing"
 # but the user isn't in here, the server was restarted mid-build and that
@@ -73,6 +76,24 @@ def get_embeddings():
 def open_vector_store(persist_directory: str):
     from langchain_community.vectorstores import Chroma
     return Chroma(persist_directory=persist_directory, embedding_function=get_embeddings())
+
+
+@lru_cache(maxsize=8)
+def get_keyword_index(persist_directory: str) -> KeywordIndex:
+    """BM25 index over a database's chunks, built once per database folder (a rebuild
+    creates a new folder, so the cache never serves a stale index)."""
+    return KeywordIndex.from_chroma(open_vector_store(persist_directory))
+
+
+def safe_keyword_index(persist_directory: str) -> Optional[KeywordIndex]:
+    """Keyword index, or None (-> vector-only search) if it cannot be built."""
+    if RETRIEVAL_MODE == "vector":
+        return None
+    try:
+        return get_keyword_index(persist_directory)
+    except Exception as e:
+        print(f"Keyword index unavailable, using vector search only: {type(e).__name__}: {e}")
+        return None
 
 
 def make_llm(api_key: str, model: Optional[str] = None):
@@ -176,17 +197,17 @@ def get_courses(username: str):
         return {"courses": []}
 
 
-def retrieve(llm, db, question: str, course: Optional[str], history: list, k: int = TOP_K):
+def retrieve(llm, db, question: str, course: Optional[str], history: list, k: int = TOP_K,
+             keyword_index: Optional[KeywordIndex] = None, mode: Optional[str] = None):
     """The retrieval half of the RAG pipeline, shared by the API and the evaluation.
 
     Returns (search_query, docs). Memory step 1: with chat history, follow-ups like
     "what about its range?" are rewritten into a standalone search query first.
+    Then hybrid search: keyword (BM25) and vector results fused with RRF.
     """
     search_query = condense_question(llm, question, history)
-    search_kwargs = {"k": k}
-    if course:
-        search_kwargs["filter"] = {"course": {"$eq": course}}
-    return search_query, db.similarity_search(query=search_query, **search_kwargs)
+    docs = search(db, keyword_index, search_query, k, course or None, mode or RETRIEVAL_MODE)
+    return search_query, docs
 
 
 def _event(kind: str, **data) -> str:
@@ -221,7 +242,8 @@ def query_database(payload: QueryPayload):
             llm = make_llm(api_key)
             db = open_vector_store(persist_directory)
 
-            search_query, docs = retrieve(llm, db, payload.question, payload.course, history)
+            search_query, docs = retrieve(llm, db, payload.question, payload.course, history,
+                                          keyword_index=safe_keyword_index(persist_directory))
             context, sources = number_sources(docs)
             yield _event("sources", sources=sources, search_query=search_query)
 

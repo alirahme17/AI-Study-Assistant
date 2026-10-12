@@ -6,6 +6,7 @@ Usage (from the backend folder, with the venv active):
     python eval/run_eval.py --user mhmd123 --retrieval-only # no Gemini calls, no API key needed
     python eval/run_eval.py --user mhmd123 --ids q05,q06    # a subset
     python eval/run_eval.py --user mhmd123 --resume         # continue the latest unfinished run
+    python eval/run_eval.py --user mhmd123 --compare        # retrieval only: vector vs bm25 vs hybrid
 
 Free-tier Gemini keys have a small DAILY quota per model. The judge therefore uses a different
 model (--judge-model) so its calls come out of a separate quota, and when a daily quota runs out
@@ -161,7 +162,8 @@ def with_retry(fn, attempts=4, base_delay=5, sleep=None):
 
 # ------------------------------------------------------------------- running ---
 
-def evaluate(questions, db, llm=None, judge=None, k=None, delay=0.0, log=print, on_result=None):
+def evaluate(questions, db, llm=None, judge=None, k=None, delay=0.0, log=print, on_result=None,
+             keyword_index=None, mode=None):
     """Run every question through the same retrieval + prompt the app uses.
 
     Calls on_result(res) after each question (used to save progress). Stops early,
@@ -176,7 +178,8 @@ def evaluate(questions, db, llm=None, judge=None, k=None, delay=0.0, log=print, 
     for q in questions:
         log(f"[{q['id']}] {q['question'][:80]}")
         try:
-            res = _evaluate_one(q, db, llm, judge, k, main, build_messages, message_text, number_sources, HumanMessage)
+            res = _evaluate_one(q, db, llm, judge, k, main, build_messages, message_text, number_sources,
+                                HumanMessage, keyword_index, mode)
         except QuotaExhausted as e:
             log(f"\n!! Daily API quota exhausted, stopping early: {e}")
             break
@@ -188,13 +191,15 @@ def evaluate(questions, db, llm=None, judge=None, k=None, delay=0.0, log=print, 
     return results
 
 
-def _evaluate_one(q, db, llm, judge, k, main, build_messages, message_text, number_sources, HumanMessage):
+def _evaluate_one(q, db, llm, judge, k, main, build_messages, message_text, number_sources, HumanMessage,
+                  keyword_index=None, mode=None):
     """Retrieve, answer and judge one question; raises QuotaExhausted on a daily quota."""
     res = {"id": q["id"], "course": q["course"], "type": q["type"], "language": q["language"],
            "question": q["question"], "reference": q["reference_answer"],
            "gold": sorted(f"{s} p{p}" for s, p in q["gold"]), "negative": q["is_negative"]}
     started = time.time()
-    _, docs = main.retrieve(llm, db, q["question"], q["course"] or None, [], k=k)
+    _, docs = main.retrieve(llm, db, q["question"], q["course"] or None, [], k=k,
+                            keyword_index=keyword_index, mode=mode)
     res["retrieval"] = retrieval_metrics(docs, q["gold"])
 
     if llm is not None:
@@ -267,7 +272,7 @@ def write_report(results, summary, config, out_dir):
         lines += [f"> ⚠️ **Partial run:** {len(results)} of {config['planned']} questions finished "
                   f"(API quota ran out). Continue with `python eval/run_eval.py --user {config.get('user')} --resume`.", ""]
     lines += [
-             f"Answers `{config['model']}` · judge `{config.get('judge_model') or '—'}` · embeddings `{config['embedding_model']}` · top-k {config['k']} · "
+             f"Answers `{config['model']}` · judge `{config.get('judge_model') or '—'}` · embeddings `{config['embedding_model']}` · retrieval `{config.get('retrieval', 'vector')}` · top-k {config['k']} · "
              f"{summary['answerable']} answerable + {summary['negatives']} negative questions", "",
              "## Summary", "", "| Metric | Value |", "|---|---|",
              f"| Retrieval hit@{config['k']} (right page retrieved) | {pct(summary['hit_at_k'])} |",
@@ -317,10 +322,57 @@ def write_report(results, summary, config, out_dir):
         f.write("\n".join(lines) + "\n")
 
 
+def compare_modes(questions, db, keyword_index, k, persist_directory):
+    """Retrieval-only comparison of the three modes; writes eval/results/<stamp>_compare/report.md."""
+    import main
+    modes = ["vector", "bm25", "hybrid"]
+    runs = {m: evaluate(questions, db, None, None, k=k, log=lambda *_: None, keyword_index=keyword_index, mode=m)
+            for m in modes}
+    summaries = {m: summarize(r) for m, r in runs.items()}
+    answerable = [q for q in questions if not q["is_negative"]]
+
+    lines = [f"# Retrieval comparison — {datetime.now().strftime('%Y%m%d-%H%M%S')}", "",
+             f"Embeddings `{main.EMBEDDING_MODEL}` · top-k {k} · {len(answerable)} answerable questions · "
+             f"database `{os.path.basename(persist_directory)}`", "",
+             "| Metric | " + " | ".join(modes) + " |", "|---|" + "---|" * len(modes),
+             f"| hit@{k} (right page) | " + " | ".join(pct(summaries[m]["hit_at_k"]) for m in modes) + " |",
+             "| right PDF | " + " | ".join(pct(summaries[m]["file_hit_at_k"]) for m in modes) + " |",
+             "| MRR | " + " | ".join(f"{summaries[m]['mrr']:.2f}" for m in modes) + " |", ""]
+    for key, title in (("language", "hit@k by language"), ("course", "hit@k by course")):
+        groups = sorted(summaries[modes[0]]["by"][key])
+        lines += [f"## {title}", "", "| Group | n | " + " | ".join(modes) + " |", "|---|---|" + "---|" * len(modes)]
+        for g in groups:
+            lines.append(f"| {g} | {summaries[modes[0]]['by'][key][g]['n']} | "
+                         + " | ".join(pct(summaries[m]["by"][key][g]["hit_at_k"]) for m in modes) + " |")
+        lines.append("")
+    lines += ["## Per question (rank of the right page, — = not in top k)", "",
+              "| id | lang | " + " | ".join(modes) + " | question |", "|---|---|" + "---|" * len(modes) + "---|"]
+    by_id = {m: {r["id"]: r for r in runs[m]} for m in modes}
+    for q in answerable:
+        lines.append(f"| {q['id']} | {q['language']} | "
+                     + " | ".join(str(by_id[m][q['id']]["retrieval"]["rank"] or "—") for m in modes)
+                     + f" | {q['question'][:70]} |")
+
+    out_dir = os.path.join(RESULTS_DIR, f"{datetime.now().strftime('%Y%m%d-%H%M%S')}_compare")
+    os.makedirs(out_dir, exist_ok=True)
+    with open(os.path.join(out_dir, "report.md"), "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    with open(os.path.join(out_dir, "results.json"), "w", encoding="utf-8") as f:
+        json.dump({"k": k, "summaries": summaries, "results": runs}, f, indent=2, ensure_ascii=False)
+
+    print(f"{'':12}" + "".join(f"{m:>10}" for m in modes))
+    print(f"{'hit@' + str(k):12}" + "".join(f"{pct(summaries[m]['hit_at_k']):>10}" for m in modes))
+    print(f"{'right PDF':12}" + "".join(f"{pct(summaries[m]['file_hit_at_k']):>10}" for m in modes))
+    print(f"{'MRR':12}" + "".join(f"{summaries[m]['mrr']:>10.2f}" for m in modes))
+    print(f"\nReport: {os.path.relpath(os.path.join(out_dir, 'report.md'), BACKEND_DIR)}")
+    return summaries
+
+
 def latest_run_dir():
     if not os.path.isdir(RESULTS_DIR):
         return None
-    runs = sorted(d for d in os.listdir(RESULTS_DIR) if os.path.isfile(os.path.join(RESULTS_DIR, d, "results.json")))
+    runs = sorted(d for d in os.listdir(RESULTS_DIR)
+                  if not d.endswith("_compare") and os.path.isfile(os.path.join(RESULTS_DIR, d, "results.json")))
     return os.path.join(RESULTS_DIR, runs[-1]) if runs else None
 
 
@@ -335,6 +387,10 @@ def main_cli(argv=None):
                         help="model that grades the answers; a different model uses a separate free-tier quota")
     parser.add_argument("--resume", nargs="?", const="latest", metavar="RUN_DIR",
                         help="continue an unfinished run (default: the latest one), skipping finished questions")
+    parser.add_argument("--retrieval", choices=["vector", "bm25", "hybrid"],
+                        help="retrieval mode (default: the app's RETRIEVAL_MODE)")
+    parser.add_argument("--compare", action="store_true",
+                        help="retrieval only: run vector, bm25 and hybrid and compare them (no API calls)")
     parser.add_argument("--delay", type=float, default=1.0, help="seconds to wait between questions (rate limits)")
     parser.add_argument("--include-unverified", action="store_true")
     args = parser.parse_args(argv)
@@ -350,6 +406,13 @@ def main_cli(argv=None):
     persist_directory = db_path(args.user)
     if persist_directory is None:
         sys.exit(f"No database for user '{args.user}'. Build or re-index it first.")
+
+    db = main.open_vector_store(persist_directory)
+    mode = args.retrieval or main.RETRIEVAL_MODE
+    keyword_index = None if mode == "vector" and not args.compare else main.get_keyword_index(persist_directory)
+
+    if args.compare:
+        return compare_modes(questions, db, keyword_index, args.k or main.TOP_K, persist_directory)
 
     answer_model = args.model or main.LLM_MODEL
     llm = judge = None
@@ -378,7 +441,7 @@ def main_cli(argv=None):
         config = {"timestamp": stamp, "user": args.user, "db": os.path.basename(persist_directory),
                   "model": answer_model if llm else "none (retrieval only)",
                   "judge_model": args.judge_model if llm else None,
-                  "embedding_model": main.EMBEDDING_MODEL, "k": args.k or main.TOP_K}
+                  "embedding_model": main.EMBEDDING_MODEL, "retrieval": mode, "k": args.k or main.TOP_K}
         out_dir = os.path.join(RESULTS_DIR, f"{stamp}_{answer_model if llm else 'retrieval'}")
     config["planned"] = len(previous) + len(questions)
 
@@ -390,9 +453,10 @@ def main_cli(argv=None):
         write_report(results, summarize(results), config, out_dir)
 
     print(f"Running {len(questions)} questions against {persist_directory} "
-          f"({'retrieval only' if llm is None else f'answers: {answer_model}, judge: {args.judge_model}'})\n")
-    evaluate(questions, main.open_vector_store(persist_directory), llm, judge,
-             k=config["k"], delay=args.delay if llm else 0, on_result=save)
+          f"(retrieval: {config.get('retrieval', mode)}; "
+          f"{'no answers' if llm is None else f'answers: {answer_model}, judge: {args.judge_model}'})\n")
+    evaluate(questions, db, llm, judge, k=config["k"], delay=args.delay if llm else 0, on_result=save,
+             keyword_index=keyword_index, mode=config.get("retrieval", mode))
     save()
     summary = summarize(results)
 

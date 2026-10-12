@@ -9,6 +9,7 @@ google-api-python-client
 google-auth-oauthlib
 PyMuPDF
 chromadb
+rank_bm25
 sentence-transformers
 python-dotenv
 

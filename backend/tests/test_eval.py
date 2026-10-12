@@ -84,8 +84,13 @@ def test_with_retry_retries_rate_limits_only(monkeypatch):
 
 
 class FakeStore:
+    DOCS = [doc("Radar/other.pdf", 1), doc("Radar/c1.pdf", 13)]
+
     def similarity_search(self, query, k, filter=None):
-        return [doc("Radar/other.pdf", 1), doc("Radar/c1.pdf", 13)][:k]
+        return self.DOCS[:k]
+
+    def get(self, include):
+        return {"documents": [d.page_content for d in self.DOCS], "metadatas": [d.metadata for d in self.DOCS]}
 
 
 class FakeLLM:
@@ -102,7 +107,7 @@ class FakeLLM:
 def test_end_to_end_with_fakes(tmp_path):
     write_csv(tmp_path / "q.csv", ROWS)
     qs = run_eval.load_questions(str(tmp_path / "q.csv"))
-    results = run_eval.evaluate(qs, FakeStore(), FakeLLM(), FakeLLM(), k=5, log=lambda *_: None)
+    results = run_eval.evaluate(qs, FakeStore(), FakeLLM(), FakeLLM(), k=5, log=lambda *_: None, mode="vector")
     summary = run_eval.summarize(results)
 
     assert summary["hit_at_k"] == 1.0 and summary["mrr"] == 0.5
@@ -121,7 +126,7 @@ def test_end_to_end_with_fakes(tmp_path):
 def test_retrieval_only_mode_makes_no_llm_calls(tmp_path):
     write_csv(tmp_path / "q.csv", ROWS)
     results = run_eval.evaluate(run_eval.load_questions(str(tmp_path / "q.csv")), FakeStore(), None, None,
-                                k=1, log=lambda *_: None)
+                                k=1, log=lambda *_: None, mode="vector")
     summary = run_eval.summarize(results)
     assert summary["hit_at_k"] == 0.0 and summary["file_hit_at_k"] == 0.0
     assert "answer_score" not in summary and "answer" not in results[0]
@@ -178,7 +183,7 @@ def test_quota_stops_run_cleanly_and_keeps_finished_results(tmp_path):
     saved = []
     llm = QuotaAfter(3)  # q01: answer+judge, q02: answer, then quota on q02's judge
     results = run_eval.evaluate(run_eval.load_questions(str(tmp_path / "q.csv")), FakeStore(), llm, llm,
-                                k=5, log=lambda *_: None, on_result=saved.append)
+                                k=5, log=lambda *_: None, on_result=saved.append, mode="vector")
     assert [r["id"] for r in results] == ["q01"] and saved == results
 
     config = {"timestamp": "t", "model": "m", "embedding_model": "e", "k": 5, "planned": 4, "user": "ali"}
@@ -214,6 +219,7 @@ def test_cli_stops_on_quota_then_resume_finishes_same_run(tmp_path, monkeypatch)
     monkeypatch.setattr(run_eval, "QUESTIONS_CSV", str(tmp_path / "q.csv"))
     monkeypatch.setattr(run_eval, "RESULTS_DIR", str(tmp_path / "results"))
     monkeypatch.setattr(main, "open_vector_store", lambda path: FakeStore())
+    main.get_keyword_index.cache_clear()
     models = []
 
     def make_llm(key, model=None):
@@ -235,3 +241,26 @@ def test_cli_stops_on_quota_then_resume_finishes_same_run(tmp_path, monkeypatch)
     assert [r["id"] for r in final["results"]] == ["q01", "q02", "q03", "q04"]
     assert final["summary"]["refusal_rate"] == 1.0
     assert "Partial run" not in open(os.path.join(run_dir, "report.md"), encoding="utf-8").read()
+
+
+def test_compare_mode_writes_side_by_side_report(tmp_path, monkeypatch):
+    import main
+    from workspace import STATUS_READY, write_status
+
+    write_csv(tmp_path / "q.csv", ROWS)
+    (tmp_path / "workspaces" / "ali" / "chroma_db_x").mkdir(parents=True)
+    write_status("ali", STATUS_READY, db_dir="chroma_db_x")
+    monkeypatch.setattr(run_eval, "BACKEND_DIR", str(tmp_path))
+    monkeypatch.setattr(run_eval, "QUESTIONS_CSV", str(tmp_path / "q.csv"))
+    monkeypatch.setattr(run_eval, "RESULTS_DIR", str(tmp_path / "results"))
+    monkeypatch.setattr(main, "open_vector_store", lambda path: FakeStore())
+    main.get_keyword_index.cache_clear()
+    monkeypatch.setattr(main, "make_llm", lambda *a: (_ for _ in ()).throw(AssertionError("no LLM in compare")))
+
+    summaries = run_eval.main_cli(["--user", "ali", "--compare"])
+    assert set(summaries) == {"vector", "bm25", "hybrid"}
+    assert summaries["vector"]["hit_at_k"] == 1.0
+    run_dir = [d for d in os.listdir(tmp_path / "results") if d.endswith("_compare")][0]
+    report = open(tmp_path / "results" / run_dir / "report.md", encoding="utf-8").read()
+    assert "| Metric | vector | bm25 | hybrid |" in report
+    assert run_eval.latest_run_dir() is None        # --resume never picks a comparison folder
