@@ -100,7 +100,8 @@ def render_sources(answer: str, sources: List[dict]) -> None:
     with st.expander(title, expanded=False):
         for src in shown:
             page = f" — page {src['page']}" if src.get("page") else ""
-            st.markdown(f"**[{src['id']}]** `{src['source']}`{page}")
+            scanned = " · *scanned page (OCR)*" if src.get("ocr") else ""
+            st.markdown(f"**[{src['id']}]** `{src['source']}`{page}{scanned}")
             if src.get("snippet"):
                 st.caption(src["snippet"] + "…")
 

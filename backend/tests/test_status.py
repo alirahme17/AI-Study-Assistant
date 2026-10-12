@@ -55,7 +55,7 @@ def test_empty_folder_ends_in_error(monkeypatch):
 def test_success_ends_in_ready_and_points_at_new_db(isolated_workspaces, monkeypatch):
     monkeypatch.setattr(main, "ingest_drive_data", lambda u, f: 3)
 
-    def fake_build(username):
+    def fake_build(username, **kwargs):
         (isolated_workspaces / "workspaces" / username / "chroma_db_new").mkdir(parents=True)
         return "chroma_db_new"
     monkeypatch.setattr(main, "build_user_database", fake_build)
@@ -71,7 +71,7 @@ def test_half_built_db_is_not_reported_ready(isolated_workspaces, monkeypatch):
     """Old code said "ready" as soon as the DB folder existed, even mid-build."""
     started = []
 
-    def slow_build(username):
+    def slow_build(username, **kwargs):
         (isolated_workspaces / "workspaces" / username / "chroma_db_partial").mkdir(parents=True)
         started.append(True)
         time.sleep(0.5)
@@ -81,7 +81,9 @@ def test_half_built_db_is_not_reported_ready(isolated_workspaces, monkeypatch):
 
     client = TestClient(main.app)
     _configure(client)
+    deadline = time.time() + 5
     while not started:
+        assert time.time() < deadline, "build never started"
         time.sleep(0.01)
     assert client.get("/api/status/alice").json()["status"] == "processing"
     assert _wait_until_not_processing(client, "alice")["status"] == "error"

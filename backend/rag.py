@@ -109,9 +109,12 @@ def number_sources(docs) -> tuple:
                 "file_name": meta.get("file_name") or os.path.basename(source),
                 "course": meta.get("course"),
                 "page": page,
+                "ocr": bool(meta.get("ocr")),
                 "snippet": doc.page_content[:SNIPPET_CHARS].strip(),
             })
         label = f"{source}, page {page}" if page else source
+        if meta.get("ocr"):
+            label += ", scanned page - OCR text may contain recognition errors"
         blocks.append(f"[{ids[key]}] ({label})\n{doc.page_content}")
     return "\n\n---\n\n".join(blocks), sources
 

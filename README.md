@@ -11,6 +11,9 @@ Teleco-Tutor is a full-stack, multi-user web application that allows users to tr
   * **Interactive UI:** A polished, multi-page Streamlit application provides a seamless user experience from signup and configuration to the final chat interface.
   * **Real-Time Responses:** The chatbot streams answers token-by-token for a responsive and engaging user experience.
   * **Source Citations with Page Numbers:** Every claim is cited like `[1]`, and each answer lists the exact PDF and page it came from, with a preview of the passage.
+  * **Hybrid Search:** Combines keyword search (BM25, exact technical terms like "DSDV" or "RRTS") with semantic vector search, merged with Reciprocal Rank Fusion.
+  * **OCR for Scanned PDFs:** Pages without a text layer (scanned exams) are read with RapidOCR and cached; citations mark them as scanned.
+  * **Evaluation Suite:** 25 verified questions with gold pages; measures retrieval hit@k, citation accuracy, LLM-judged answer quality and refusal of out-of-scope questions (`backend/eval/`).
   * **Conversation Memory:** Ask follow-ups ("and what about its range?"). The question is rewritten into a standalone search query using the recent conversation, and the model sees the last few turns.
 
 -----
@@ -20,7 +23,8 @@ Teleco-Tutor is a full-stack, multi-user web application that allows users to tr
   * **Backend:** Python, FastAPI, Uvicorn
   * **Frontend:** Streamlit, Streamlit-Authenticator
   * **AI/ML:** LangChain, Google Gemini (default `gemini-3.8-flash`, configurable), Sentence-Transformers, PyMuPDF
-  * **Database:** ChromaDB (Vector Store)
+  * **Database:** ChromaDB (Vector Store) + BM25 keyword index (rank_bm25)
+  * **OCR:** RapidOCR (ONNX Runtime, no external install)
   * **APIs & Auth:** Google Drive API, Google OAuth
 
 -----

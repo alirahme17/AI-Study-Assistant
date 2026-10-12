@@ -10,6 +10,7 @@ google-auth-oauthlib
 PyMuPDF
 chromadb
 rank_bm25
+rapidocr_onnxruntime
 sentence-transformers
 python-dotenv
 

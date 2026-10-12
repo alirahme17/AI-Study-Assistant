@@ -118,7 +118,8 @@ def run_data_pipeline(username: str, drive_folder_id: Optional[str]):
             label = "your downloaded PDFs"
 
         write_status(username, STATUS_PROCESSING, f"Indexing {label}...")
-        new_db_dir = build_user_database(username)
+        new_db_dir = build_user_database(
+            username, progress=lambda message: write_status(username, STATUS_PROCESSING, message))
 
         write_status(username, STATUS_READY, f"Indexed {label}.", db_dir=new_db_dir)
         remove_old_databases(username, keep_dir=new_db_dir)

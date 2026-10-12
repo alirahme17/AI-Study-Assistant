@@ -1,5 +1,6 @@
 import os
 import shutil
+from typing import Callable, Optional
 
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
@@ -10,19 +11,21 @@ from workspace import new_db_path, workspace_path
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
 
-def build_user_database(username: str) -> str:
+def build_user_database(username: str, progress: Optional[Callable[[str], None]] = None) -> str:
     """Build a fresh ChromaDB for the user and return its folder name.
 
     Raises if there is nothing to index, so the caller can report an error
     instead of waiting forever for a database that will never appear.
     """
-    chunks = process_user_pdfs(username)
+    chunks = process_user_pdfs(username, progress)
     if not chunks:
         raise RuntimeError(
             "No readable text was found in your PDFs. Check that the Drive folder "
             "contains PDFs (scanned PDFs without a text layer are not supported yet)."
         )
 
+    if progress:
+        progress(f"Building the search index ({len(chunks)} chunks)...")
     persist_directory = new_db_path(username)
     print(f"Building vector database for user '{username}' ({len(chunks)} chunks)...")
     try:

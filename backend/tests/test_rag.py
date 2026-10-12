@@ -135,7 +135,7 @@ def test_query_streams_sources_then_tokens(isolated_workspaces, monkeypatch):
     assert [e["type"] for e in events] == ["sources", "token", "token", "done"]
     assert events[0]["sources"][0] == {
         "id": 1, "source": "Radar/Course/chap1.pdf", "file_name": "chap1.pdf",
-        "course": "Radar", "page": 12, "snippet": "R_max formula"}
+        "course": "Radar", "page": 12, "ocr": False, "snippet": "R_max formula"}
     assert "".join(e["text"] for e in events if e["type"] == "token") == "Range is R_max [1]."
 
 
@@ -172,7 +172,7 @@ def test_rebuild_reindexes_without_drive(isolated_workspaces, monkeypatch):
     (isolated_workspaces / "workspaces" / "alice" / "data").mkdir(parents=True)
     monkeypatch.setattr(main, "ingest_drive_data", lambda *a: (_ for _ in ()).throw(AssertionError("Drive used")))
 
-    def fake_build(username):
+    def fake_build(username, **kwargs):
         (isolated_workspaces / "workspaces" / username / "chroma_db_v2").mkdir()
         return "chroma_db_v2"
     monkeypatch.setattr(main, "build_user_database", fake_build)
