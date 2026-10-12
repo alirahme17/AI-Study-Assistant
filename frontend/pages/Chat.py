@@ -63,17 +63,53 @@ def stream_query_backend(question: str, api_url: str, username: str, course: str
         yield f"**Error:** Failed to connect to backend: {e}"
 
 
-# --- Main Application Logic (from your original file) ---
-try:
-    status_resp = requests.get(f"{API_URL}/api/status/{username}")
-    is_configured = status_resp.status_code == 200 and status_resp.json().get("status") == "ready"
-except requests.exceptions.RequestException:
-    is_configured = False
-    st.error("Could not connect to the backend to check status. Is the server running?")
+# --- Main Application Logic ---
+POLL_SECONDS = 5
+MAX_WAIT_SECONDS = 60 * 60  # stop waiting after an hour and tell the user
+
+
+def fetch_status() -> dict:
+    """Returns {"status": not_configured|processing|ready|error|unreachable, "message": str}."""
+    try:
+        resp = requests.get(f"{API_URL}/api/status/{username}", timeout=10)
+        if resp.status_code == 200:
+            return resp.json()
+        return {"status": "error", "message": f"Backend returned {resp.status_code}: {resp.text[:200]}"}
+    except requests.exceptions.RequestException:
+        return {"status": "unreachable", "message": "Could not connect to the backend. Is the server running?"}
+
+
+def wait_for_processing():
+    """Poll until the build finishes (ready or error), showing live progress."""
+    progress = st.empty()
+    started = time.time()
+    with st.spinner("Building your knowledge base... This can take several minutes."):
+        while time.time() - started < MAX_WAIT_SECONDS:
+            current = fetch_status()
+            if current["status"] != "processing":
+                st.rerun()
+            progress.info(current.get("message") or "Processing...")
+            time.sleep(POLL_SECONDS)
+    progress.warning("This is taking longer than expected. Refresh the page to check again.")
+
+
+status = fetch_status()
+is_configured = status["status"] == "ready"
+
+if status["status"] == "unreachable":
+    st.error(status["message"])
+    st.stop()
+
+if status["status"] == "processing":
+    st.header("First-Time Setup")
+    wait_for_processing()
+    st.stop()
 
 if not is_configured:
     # --- CONFIGURATION UI ---
     st.header("First-Time Setup")
+    if status["status"] == "error":
+        st.error(f"The last setup attempt failed: {status.get('message')}")
     st.info("Please provide your Google Drive link and Gemini API key to build your personal knowledge base.")
     drive_url = st.text_input("Google Drive Folder URL", help="The URL of the main folder containing all your course materials.")
     gemini_key = st.text_input("Gemini API Key", type="password", help="Get your key from Google AI Studio.")
@@ -82,24 +118,18 @@ if not is_configured:
             st.error("Please provide both a Drive URL and an API key.")
         else:
             payload = {"username": username, "drive_folder_url": drive_url, "gemini_api_key": gemini_key}
-            with st.spinner("Sending configuration to backend..."):
-                try:
-                    resp = requests.post(f"{API_URL}/api/configure", json=payload)
-                    if resp.status_code == 200:
-                        st.success("Configuration sent! The backend is now processing your documents. This page will refresh automatically when it's ready.")
-                        with st.spinner("Processing documents... Please wait. This can take several minutes."):
-                            while True:
-                                status_check = requests.get(f"{API_URL}/api/status/{username}")
-                                if status_check.status_code == 200 and status_check.json().get("status") == "ready":
-                                    st.success("Your knowledge base is ready! The app will now reload.")
-                                    time.sleep(2)
-                                    st.rerun()
-                                    break
-                                time.sleep(10)
-                    else:
-                        st.error(f"Error from backend: {resp.text}")
-                except requests.exceptions.RequestException as e:
-                    st.error(f"Failed to connect to backend: {e}")
+            try:
+                resp = requests.post(f"{API_URL}/api/configure", json=payload, timeout=30)
+                if resp.status_code == 200:
+                    st.success("Configuration sent! Your documents are being processed.")
+                    wait_for_processing()
+                elif resp.status_code == 409:
+                    wait_for_processing()
+                else:
+                    detail = resp.json().get("detail", resp.text) if resp.headers.get("content-type", "").startswith("application/json") else resp.text
+                    st.error(f"Error from backend: {detail}")
+            except requests.exceptions.RequestException as e:
+                st.error(f"Failed to connect to backend: {e}")
 else:
     # --- MAIN CHAT UI ---
     st.title(f"Teleco-Tutor for {name}")

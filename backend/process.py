@@ -1,14 +1,15 @@
 import os
 import fitz
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+from workspace import data_path
 
 def process_user_pdfs(username: str):
     """
     Processes all PDFs in a specific user's data directory, chunks them,
     and assigns correct metadata.
     """
-    workspace_path = os.path.join("workspaces", username)
-    data_directory = os.path.join(workspace_path, "data")
+    data_directory = data_path(username)
     all_chunks = []
     
     if not os.path.exists(data_directory):

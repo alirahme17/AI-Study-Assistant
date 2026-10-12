@@ -132,6 +132,17 @@ Your browser will open to `http://localhost:8501`, where you can use the applica
 
 -----
 
+## \#\# Running the Tests
+
+```bash
+cd backend
+pytest
+```
+
+The tests fake Google Drive and Gemini, so they need no API keys or internet access.
+
+-----
+
 ## \#\# Usage
 
 1.  Navigate to the Streamlit URL (`http://localhost:8501`).

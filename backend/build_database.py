@@ -1,27 +1,46 @@
 import os
+import shutil
+
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
-from process import process_user_pdfs
 
-def build_user_database(username: str):
+from process import process_user_pdfs
+from workspace import new_db_path, workspace_path
+
+EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+
+
+def build_user_database(username: str) -> str:
+    """Build a fresh ChromaDB for the user and return its folder name.
+
+    Raises if there is nothing to index, so the caller can report an error
+    instead of waiting forever for a database that will never appear.
     """
-    Builds a ChromaDB vector database for a specific user in their workspace.
-    """
-    workspace_path = os.path.join("workspaces", username)
-    persist_directory = os.path.join(workspace_path, "chroma_db")
-    
     chunks = process_user_pdfs(username)
     if not chunks:
-        print(f"No chunks found for user '{username}'. Database not built.")
-        return
+        raise RuntimeError(
+            "No readable text was found in your PDFs. Check that the Drive folder "
+            "contains PDFs (scanned PDFs without a text layer are not supported yet)."
+        )
 
-    print(f"Building vector database for user '{username}'...")
-    model_name = "sentence-transformers/all-MiniLM-L6-v2"
-    embeddings_model = HuggingFaceEmbeddings(model_name=model_name)
-    
-    db = Chroma.from_documents(
-        documents=chunks,
-        embedding=embeddings_model,
-        persist_directory=persist_directory
-    )
-    print(f"\nVector database for user '{username}' built successfully!")
+    persist_directory = new_db_path(username)
+    print(f"Building vector database for user '{username}' ({len(chunks)} chunks)...")
+    try:
+        Chroma.from_documents(
+            documents=chunks,
+            embedding=HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL),
+            persist_directory=persist_directory,
+        )
+    except Exception:
+        shutil.rmtree(persist_directory, ignore_errors=True)
+        raise
+    print(f"Vector database for user '{username}' built successfully!")
+    return os.path.basename(persist_directory)
+
+
+def remove_old_databases(username: str, keep_dir: str) -> None:
+    """Best-effort cleanup of previous builds (a file still open on Windows is skipped)."""
+    root = workspace_path(username)
+    for name in os.listdir(root):
+        if name.startswith("chroma_db") and name != keep_dir and os.path.isdir(os.path.join(root, name)):
+            shutil.rmtree(os.path.join(root, name), ignore_errors=True)
