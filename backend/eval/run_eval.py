@@ -5,6 +5,11 @@ Usage (from the backend folder, with the venv active):
     python eval/run_eval.py --user mhmd123                  # full run: retrieval + answers + judge
     python eval/run_eval.py --user mhmd123 --retrieval-only # no Gemini calls, no API key needed
     python eval/run_eval.py --user mhmd123 --ids q05,q06    # a subset
+    python eval/run_eval.py --user mhmd123 --resume         # continue the latest unfinished run
+
+Free-tier Gemini keys have a small DAILY quota per model. The judge therefore uses a different
+model (--judge-model) so its calls come out of a separate quota, and when a daily quota runs out
+the run stops cleanly, keeps everything finished so far, and can be continued later with --resume.
 
 What is measured for each question (negatives excluded where it makes no sense):
 
@@ -64,8 +69,8 @@ question anyway, e.g. from general knowledge (false)? Reply with ONLY a JSON obj
 
 # ------------------------------------------------------------------ loading ---
 
-def load_questions(path=QUESTIONS_CSV, ids=None, only_verified=True):
-    with open(path, encoding="utf-8-sig", newline="") as f:
+def load_questions(path=None, ids=None, only_verified=True):
+    with open(path or QUESTIONS_CSV, encoding="utf-8-sig", newline="") as f:
         rows = list(csv.DictReader(f))
     out = []
     for r in rows:
@@ -120,24 +125,48 @@ def parse_json_reply(text):
     return json.loads(match.group(0))
 
 
-def with_retry(fn, attempts=4, base_delay=5):
-    """Retry on rate limits / transient API errors with exponential backoff."""
+class QuotaExhausted(Exception):
+    """A daily (or otherwise long) quota ran out: retrying now is pointless."""
+
+
+def _is_long_quota(message: str) -> bool:
+    if re.search(r"PerDay|per day|daily", message, re.I):
+        return True
+    # "Please retry in 11h11m16s" / "retryDelay': '40276s'" -> anything over 2 minutes
+    hours = re.search(r"retry in (\d+)h", message)
+    seconds = re.search(r"retryDelay'?:\s*'(\d+)s", message)
+    return bool(hours) or bool(seconds and int(seconds.group(1)) > 120)
+
+
+def with_retry(fn, attempts=4, base_delay=5, sleep=None):
+    """Retry on per-minute rate limits / transient errors with exponential backoff.
+
+    Daily quota errors raise QuotaExhausted immediately instead of retrying.
+    """
+    sleep = sleep or time.sleep
     for i in range(attempts):
         try:
             return fn()
         except Exception as e:
-            transient = re.search(r"429|rate|quota|exhausted|503|unavailable|timeout|deadline", str(e), re.I)
+            message = str(e)
+            if re.search(r"429|RESOURCE_EXHAUSTED|quota", message, re.I) and _is_long_quota(message):
+                raise QuotaExhausted(message.split("\n")[0][:300]) from e
+            transient = re.search(r"429|rate|quota|exhausted|503|unavailable|timeout|deadline", message, re.I)
             if not transient or i == attempts - 1:
                 raise
             wait = base_delay * 2 ** i
             print(f"    transient error ({type(e).__name__}), retrying in {wait}s...")
-            time.sleep(wait)
+            sleep(wait)
 
 
 # ------------------------------------------------------------------- running ---
 
-def evaluate(questions, db, llm=None, judge=None, k=None, delay=0.0, log=print):
-    """Run every question through the same retrieval + prompt the app uses."""
+def evaluate(questions, db, llm=None, judge=None, k=None, delay=0.0, log=print, on_result=None):
+    """Run every question through the same retrieval + prompt the app uses.
+
+    Calls on_result(res) after each question (used to save progress). Stops early,
+    returning what is finished, if a daily API quota runs out.
+    """
     from langchain_core.messages import HumanMessage
     import main
     from rag import build_messages, message_text, number_sources
@@ -146,33 +175,46 @@ def evaluate(questions, db, llm=None, judge=None, k=None, delay=0.0, log=print):
     results = []
     for q in questions:
         log(f"[{q['id']}] {q['question'][:80]}")
-        res = {"id": q["id"], "course": q["course"], "type": q["type"], "language": q["language"],
-               "question": q["question"], "reference": q["reference_answer"],
-               "gold": sorted(f"{s} p{p}" for s, p in q["gold"]), "negative": q["is_negative"]}
-        started = time.time()
-        _, docs = main.retrieve(llm, db, q["question"], q["course"] or None, [], k=k)
-        res["retrieval"] = retrieval_metrics(docs, q["gold"])
-
-        if llm is not None:
-            context, sources = number_sources(docs)
-            answer = with_retry(lambda: message_text(llm.invoke(build_messages(q["question"], context, []))))
-            res["answer"] = answer
-            res["latency_s"] = round(time.time() - started, 2)
-            if q["is_negative"]:
-                verdict = parse_json_reply(message_text(with_retry(lambda: judge.invoke(
-                    [HumanMessage(REFUSAL_PROMPT.format(question=q["question"], answer=answer))]))))
-                res["refused"] = bool(verdict.get("refused"))
-                res["judge_reason"] = verdict.get("reason", "")
-            else:
-                res["citation"] = citation_metrics(answer, sources, q["gold"])
-                verdict = parse_json_reply(message_text(with_retry(lambda: judge.invoke(
-                    [HumanMessage(JUDGE_PROMPT.format(question=q["question"], reference=q["reference_answer"],
-                                                      answer=answer))]))))
-                res["score"] = int(verdict.get("score", 0))
-                res["judge_reason"] = verdict.get("reason", "")
-            time.sleep(delay)
+        try:
+            res = _evaluate_one(q, db, llm, judge, k, main, build_messages, message_text, number_sources, HumanMessage)
+        except QuotaExhausted as e:
+            log(f"\n!! Daily API quota exhausted, stopping early: {e}")
+            break
         results.append(res)
+        if on_result:
+            on_result(res)
+        if llm is not None:
+            time.sleep(delay)
     return results
+
+
+def _evaluate_one(q, db, llm, judge, k, main, build_messages, message_text, number_sources, HumanMessage):
+    """Retrieve, answer and judge one question; raises QuotaExhausted on a daily quota."""
+    res = {"id": q["id"], "course": q["course"], "type": q["type"], "language": q["language"],
+           "question": q["question"], "reference": q["reference_answer"],
+           "gold": sorted(f"{s} p{p}" for s, p in q["gold"]), "negative": q["is_negative"]}
+    started = time.time()
+    _, docs = main.retrieve(llm, db, q["question"], q["course"] or None, [], k=k)
+    res["retrieval"] = retrieval_metrics(docs, q["gold"])
+
+    if llm is not None:
+        context, sources = number_sources(docs)
+        answer = with_retry(lambda: message_text(llm.invoke(build_messages(q["question"], context, []))))
+        res["answer"] = answer
+        res["latency_s"] = round(time.time() - started, 2)
+        if q["is_negative"]:
+            verdict = parse_json_reply(message_text(with_retry(lambda: judge.invoke(
+                [HumanMessage(REFUSAL_PROMPT.format(question=q["question"], answer=answer))]))))
+            res["refused"] = bool(verdict.get("refused"))
+            res["judge_reason"] = verdict.get("reason", "")
+        else:
+            res["citation"] = citation_metrics(answer, sources, q["gold"])
+            verdict = parse_json_reply(message_text(with_retry(lambda: judge.invoke(
+                [HumanMessage(JUDGE_PROMPT.format(question=q["question"], reference=q["reference_answer"],
+                                                  answer=answer))]))))
+            res["score"] = int(verdict.get("score", 0))
+            res["judge_reason"] = verdict.get("reason", "")
+    return res
 
 
 def summarize(results):
@@ -220,8 +262,12 @@ def write_report(results, summary, config, out_dir):
         json.dump({"config": config, "summary": summary, "results": results}, f, indent=2, ensure_ascii=False)
 
     full = "answer_score" in summary
-    lines = [f"# Evaluation report — {config['timestamp']}", "",
-             f"Model `{config['model']}` · embeddings `{config['embedding_model']}` · top-k {config['k']} · "
+    lines = [f"# Evaluation report — {config['timestamp']}", ""]
+    if config.get("planned") and config["planned"] > len(results):
+        lines += [f"> ⚠️ **Partial run:** {len(results)} of {config['planned']} questions finished "
+                  f"(API quota ran out). Continue with `python eval/run_eval.py --user {config.get('user')} --resume`.", ""]
+    lines += [
+             f"Answers `{config['model']}` · judge `{config.get('judge_model') or '—'}` · embeddings `{config['embedding_model']}` · top-k {config['k']} · "
              f"{summary['answerable']} answerable + {summary['negatives']} negative questions", "",
              "## Summary", "", "| Metric | Value |", "|---|---|",
              f"| Retrieval hit@{config['k']} (right page retrieved) | {pct(summary['hit_at_k'])} |",
@@ -271,12 +317,24 @@ def write_report(results, summary, config, out_dir):
         f.write("\n".join(lines) + "\n")
 
 
+def latest_run_dir():
+    if not os.path.isdir(RESULTS_DIR):
+        return None
+    runs = sorted(d for d in os.listdir(RESULTS_DIR) if os.path.isfile(os.path.join(RESULTS_DIR, d, "results.json")))
+    return os.path.join(RESULTS_DIR, runs[-1]) if runs else None
+
+
 def main_cli(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--user", required=True, help="workspace username whose database and API key to use")
     parser.add_argument("--retrieval-only", action="store_true", help="skip answer generation and judging")
     parser.add_argument("--ids", help="comma-separated question ids, e.g. q01,q05")
     parser.add_argument("--k", type=int, help="number of chunks to retrieve (default: the app's TOP_K)")
+    parser.add_argument("--model", help="model that writes the answers (default: the app's model, GEMINI_MODEL)")
+    parser.add_argument("--judge-model", default=os.getenv("GEMINI_JUDGE_MODEL", "gemini-3.5-flash-lite"),
+                        help="model that grades the answers; a different model uses a separate free-tier quota")
+    parser.add_argument("--resume", nargs="?", const="latest", metavar="RUN_DIR",
+                        help="continue an unfinished run (default: the latest one), skipping finished questions")
     parser.add_argument("--delay", type=float, default=1.0, help="seconds to wait between questions (rate limits)")
     parser.add_argument("--include-unverified", action="store_true")
     args = parser.parse_args(argv)
@@ -293,28 +351,55 @@ def main_cli(argv=None):
     if persist_directory is None:
         sys.exit(f"No database for user '{args.user}'. Build or re-index it first.")
 
+    answer_model = args.model or main.LLM_MODEL
     llm = judge = None
     if not args.retrieval_only:
         key = get_user_api_key(args.user)
         if not key:
             sys.exit(f"No GEMINI_API_KEY in workspaces/{args.user}/.env (or use --retrieval-only).")
-        llm = main.make_llm(key)
-        judge = main.make_llm(key)
+        llm = main.make_llm(key, answer_model)
+        judge = main.make_llm(key, args.judge_model)
+
+    # Resume: reuse the previous run's folder and skip questions it already finished.
+    previous = []
+    if args.resume:
+        out_dir = latest_run_dir() if args.resume == "latest" else os.path.abspath(args.resume)
+        if not out_dir:
+            sys.exit("Nothing to resume: no previous run in eval/results/.")
+        with open(os.path.join(out_dir, "results.json"), encoding="utf-8") as f:
+            saved = json.load(f)
+        config = saved["config"]
+        previous = saved["results"]
+        done = {r["id"] for r in previous}
+        questions = [q for q in questions if q["id"] not in done]
+        print(f"Resuming {os.path.basename(out_dir)}: {len(done)} done, {len(questions)} to go.")
+    else:
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        config = {"timestamp": stamp, "user": args.user, "db": os.path.basename(persist_directory),
+                  "model": answer_model if llm else "none (retrieval only)",
+                  "judge_model": args.judge_model if llm else None,
+                  "embedding_model": main.EMBEDDING_MODEL, "k": args.k or main.TOP_K}
+        out_dir = os.path.join(RESULTS_DIR, f"{stamp}_{answer_model if llm else 'retrieval'}")
+    config["planned"] = len(previous) + len(questions)
+
+    results = list(previous)
+
+    def save(res=None):
+        if res is not None:
+            results.append(res)
+        write_report(results, summarize(results), config, out_dir)
 
     print(f"Running {len(questions)} questions against {persist_directory} "
-          f"({'retrieval only' if llm is None else 'model ' + main.LLM_MODEL})\n")
-    results = evaluate(questions, main.open_vector_store(persist_directory), llm, judge,
-                       k=args.k, delay=args.delay if llm else 0)
+          f"({'retrieval only' if llm is None else f'answers: {answer_model}, judge: {args.judge_model}'})\n")
+    evaluate(questions, main.open_vector_store(persist_directory), llm, judge,
+             k=config["k"], delay=args.delay if llm else 0, on_result=save)
+    save()
     summary = summarize(results)
 
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    config = {"timestamp": stamp, "user": args.user, "db": os.path.basename(persist_directory),
-              "model": main.LLM_MODEL if llm else "none (retrieval only)",
-              "embedding_model": main.EMBEDDING_MODEL, "k": args.k or main.TOP_K}
-    out_dir = os.path.join(RESULTS_DIR, f"{stamp}_{'retrieval' if llm is None else main.LLM_MODEL}")
-    write_report(results, summary, config, out_dir)
-
     print("\n=== Summary ===")
+    if len(results) < config["planned"]:
+        print(f"PARTIAL: {len(results)}/{config['planned']} questions finished. "
+              f"Run again later with --resume to finish.")
     print(f"Retrieval hit@{config['k']}: {pct(summary['hit_at_k'])}   right PDF: {pct(summary['file_hit_at_k'])}   "
           f"MRR: {summary['mrr']:.2f}")
     if "answer_score" in summary:

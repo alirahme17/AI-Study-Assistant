@@ -32,4 +32,10 @@ python eval/run_eval.py --user mhmd123                  # full run (uses the use
 python eval/run_eval.py --user mhmd123 --retrieval-only # retrieval metrics only, no API calls
 ```
 
+**Free-tier quota:** free Gemini keys allow only a small number of requests *per model per day* (20 for `gemini-3.8-flash` at the time of writing), and a full run needs about 50. The judge therefore uses a different model (`--judge-model`, default `gemini-3.5-flash-lite`) so it draws on a separate quota. When a daily quota runs out, the run stops cleanly and keeps every finished question; continue it the next day with:
+
+```powershell
+python eval/run_eval.py --user mhmd123 --resume
+```
+
 Each run writes `eval/results/<timestamp>_<model>/report.md` (readable summary) and `results.json` (everything, for comparing runs). The answer judge is the same Gemini model that writes the answers, so treat the answer score as a strong signal, not ground truth; the retrieval and citation metrics are exact.

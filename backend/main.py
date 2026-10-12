@@ -75,9 +75,9 @@ def open_vector_store(persist_directory: str):
     return Chroma(persist_directory=persist_directory, embedding_function=get_embeddings())
 
 
-def make_llm(api_key: str):
+def make_llm(api_key: str, model: Optional[str] = None):
     from langchain_google_genai import ChatGoogleGenerativeAI
-    return ChatGoogleGenerativeAI(model=LLM_MODEL, google_api_key=api_key)
+    return ChatGoogleGenerativeAI(model=model or LLM_MODEL, google_api_key=api_key)
 
 
 def run_data_pipeline(username: str, drive_folder_id: Optional[str]):

@@ -125,3 +125,113 @@ def test_retrieval_only_mode_makes_no_llm_calls(tmp_path):
     summary = run_eval.summarize(results)
     assert summary["hit_at_k"] == 0.0 and summary["file_hit_at_k"] == 0.0
     assert "answer_score" not in summary and "answer" not in results[0]
+
+
+# The exact error Ali got on the free tier (shortened).
+DAILY_QUOTA_ERROR = ("Error calling model 'gemini-3.8-flash' (RESOURCE_EXHAUSTED): 429 RESOURCE_EXHAUSTED. "
+                     "{'error': {'code': 429, 'message': 'You exceeded your current quota... Quota exceeded for "
+                     "metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 20, "
+                     "model: gemini-3.8-flash\\nPlease retry in 11h11m16.067487952s.', 'details': [{'quotaId': "
+                     "'GenerateRequestsPerDayPerProjectPerModel-FreeTier'}, {'retryDelay': '40276s'}]}}")
+
+
+def test_daily_quota_is_not_retried():
+    calls = []
+
+    def exhausted():
+        calls.append(1)
+        raise RuntimeError(DAILY_QUOTA_ERROR)
+    try:
+        run_eval.with_retry(exhausted, sleep=lambda s: None)
+        raise AssertionError("should have raised")
+    except run_eval.QuotaExhausted:
+        pass
+    assert len(calls) == 1          # no pointless 5s/10s/20s retries
+
+
+def test_per_minute_limit_is_still_retried():
+    calls = []
+
+    def minute_limit():
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("429 RESOURCE_EXHAUSTED ... Please retry in 7.5s. retryDelay': '7s'")
+        return "ok"
+    assert run_eval.with_retry(minute_limit, sleep=lambda s: None) == "ok"
+
+
+class QuotaAfter(FakeLLM):
+    """Works for the first n calls, then hits the daily quota."""
+    def __init__(self, n):
+        self.left = n
+
+    def invoke(self, messages):
+        if self.left == 0:
+            raise RuntimeError(DAILY_QUOTA_ERROR)
+        self.left -= 1
+        return super().invoke(messages)
+
+
+def test_quota_stops_run_cleanly_and_keeps_finished_results(tmp_path):
+    rows = [dict(ROWS[0], id=f"q{i:02d}") for i in range(1, 5)]
+    write_csv(tmp_path / "q.csv", rows)
+    saved = []
+    llm = QuotaAfter(3)  # q01: answer+judge, q02: answer, then quota on q02's judge
+    results = run_eval.evaluate(run_eval.load_questions(str(tmp_path / "q.csv")), FakeStore(), llm, llm,
+                                k=5, log=lambda *_: None, on_result=saved.append)
+    assert [r["id"] for r in results] == ["q01"] and saved == results
+
+    config = {"timestamp": "t", "model": "m", "embedding_model": "e", "k": 5, "planned": 4, "user": "ali"}
+    run_eval.write_report(results, run_eval.summarize(results), config, str(tmp_path / "out"))
+    report = (tmp_path / "out" / "report.md").read_text(encoding="utf-8")
+    assert "Partial run:** 1 of 4 questions finished" in report and "--resume" in report
+
+
+def test_message_text_does_not_call_text_property_strings():
+    from rag import message_text
+
+    class StrText(str):
+        def __call__(self):
+            raise AssertionError("deprecated .text() should not be called")
+
+    class Msg:
+        text = StrText("hello")
+    assert message_text(Msg()) == "hello"
+
+
+def test_cli_stops_on_quota_then_resume_finishes_same_run(tmp_path, monkeypatch):
+    import main
+    from workspace import STATUS_READY, save_user_api_key, write_status
+
+    rows = [dict(ROWS[0], id=f"q{i:02d}") for i in range(1, 4)] + [ROWS[1]]
+    rows[-1] = dict(rows[-1], id="q04")
+    write_csv(tmp_path / "q.csv", rows)
+    save_user_api_key("ali", "KEY")
+    (tmp_path / "workspaces" / "ali" / "chroma_db_x").mkdir(parents=True)
+    write_status("ali", STATUS_READY, db_dir="chroma_db_x")
+
+    monkeypatch.setattr(run_eval, "BACKEND_DIR", str(tmp_path))
+    monkeypatch.setattr(run_eval, "QUESTIONS_CSV", str(tmp_path / "q.csv"))
+    monkeypatch.setattr(run_eval, "RESULTS_DIR", str(tmp_path / "results"))
+    monkeypatch.setattr(main, "open_vector_store", lambda path: FakeStore())
+    models = []
+
+    def make_llm(key, model=None):
+        models.append(model)
+        return llm
+    monkeypatch.setattr(main, "make_llm", make_llm)
+
+    llm = QuotaAfter(2)                       # day 1: only q01 fits in the quota
+    run_eval.main_cli(["--user", "ali", "--delay", "0"])
+    assert models[-1] == "gemini-3.5-flash-lite" and models[-2] == main.LLM_MODEL   # judge on its own model
+    run_dir = run_eval.latest_run_dir()
+    first = json.loads(open(os.path.join(run_dir, "results.json"), encoding="utf-8").read())
+    assert [r["id"] for r in first["results"]] == ["q01"] and first["config"]["planned"] == 4
+
+    llm = QuotaAfter(100)                     # day 2: quota reset
+    run_eval.main_cli(["--user", "ali", "--resume", "--delay", "0"])
+    assert run_eval.latest_run_dir() == run_dir                     # same run folder, not a new one
+    final = json.loads(open(os.path.join(run_dir, "results.json"), encoding="utf-8").read())
+    assert [r["id"] for r in final["results"]] == ["q01", "q02", "q03", "q04"]
+    assert final["summary"]["refusal_rate"] == 1.0
+    assert "Partial run" not in open(os.path.join(run_dir, "report.md"), encoding="utf-8").read()

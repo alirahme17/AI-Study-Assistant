@@ -41,10 +41,12 @@ def message_text(message) -> str:
     plain string; `.text` normalises that (a method in langchain-core 0.3, a property in 1.x).
     """
     text = getattr(message, "text", None)
-    if callable(text):
+    if isinstance(text, str):          # langchain-core 1.x: a str (also callable, but calling it warns)
+        return str(text)
+    if callable(text):                 # langchain-core 0.3: a method
         text = text()
-    if isinstance(text, str):
-        return text
+        if isinstance(text, str):
+            return text
     content = getattr(message, "content", "")
     if isinstance(content, list):
         return "".join(p.get("text", "") if isinstance(p, dict) else str(p) for p in content)
