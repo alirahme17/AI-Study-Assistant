@@ -17,8 +17,6 @@ __pycache__/
 venv/
 .venv/
 
-# --- Old prototype ---
-backend/main.txt
 
 # --- Test artifacts ---
 .coverage

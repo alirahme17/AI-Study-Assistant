@@ -34,7 +34,7 @@ def _ready_user(tmp_path, username, key):
 
 
 def test_each_user_gets_their_own_key(isolated_workspaces, monkeypatch):
-    monkeypatch.setattr(main, "open_vector_store", lambda path: FakeStore())
+    monkeypatch.setattr(main, "open_vector_store", lambda path, *args: FakeStore())
     monkeypatch.setattr(main, "make_llm", lambda key: FakeLLM(key))
     _ready_user(isolated_workspaces, "alice", "KEY-ALICE")
     _ready_user(isolated_workspaces, "bob", "KEY-BOB")

@@ -8,7 +8,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from build_database import EMBEDDING_MODEL, build_user_database, remove_old_databases
+from build_database import build_user_database, remove_old_databases
+from embeddings import DEFAULT_MODEL as EMBEDDING_MODEL, LEGACY_MODEL, get_embeddings
 from ingest import extract_folder_id, ingest_drive_data
 from rag import build_messages, condense_question, message_text, number_sources, trim_history
 from search import KeywordIndex, search
@@ -18,6 +19,7 @@ from workspace import (
     STATUS_READY,
     data_path,
     db_path,
+    embedding_model_for,
     get_user_api_key,
     read_status,
     save_user_api_key,
@@ -66,16 +68,10 @@ def _checked_username(username: str) -> str:
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@lru_cache(maxsize=1)
-def get_embeddings():
-    """Load the embedding model once per process instead of on every question."""
-    from langchain_community.embeddings import HuggingFaceEmbeddings
-    return HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
-
-
-def open_vector_store(persist_directory: str):
+def open_vector_store(persist_directory: str, embedding_model: str = LEGACY_MODEL):
+    """Open a database with the embedding model it was built with (see embedding_model_for)."""
     from langchain_community.vectorstores import Chroma
-    return Chroma(persist_directory=persist_directory, embedding_function=get_embeddings())
+    return Chroma(persist_directory=persist_directory, embedding_function=get_embeddings(embedding_model))
 
 
 @lru_cache(maxsize=8)
@@ -119,9 +115,11 @@ def run_data_pipeline(username: str, drive_folder_id: Optional[str]):
 
         write_status(username, STATUS_PROCESSING, f"Indexing {label}...")
         new_db_dir = build_user_database(
-            username, progress=lambda message: write_status(username, STATUS_PROCESSING, message))
+            username, progress=lambda message: write_status(username, STATUS_PROCESSING, message),
+            embedding_model=EMBEDDING_MODEL)
 
-        write_status(username, STATUS_READY, f"Indexed {label}.", db_dir=new_db_dir)
+        write_status(username, STATUS_READY, f"Indexed {label}.", db_dir=new_db_dir,
+                     embedding_model=EMBEDDING_MODEL)
         remove_old_databases(username, keep_dir=new_db_dir)
         print(f"Data pipeline for user '{username}' completed successfully.")
     except Exception as e:
@@ -241,7 +239,7 @@ def query_database(payload: QueryPayload):
     def stream_events():
         try:
             llm = make_llm(api_key)
-            db = open_vector_store(persist_directory)
+            db = open_vector_store(persist_directory, embedding_model_for(username))
 
             search_query, docs = retrieve(llm, db, payload.question, payload.course, history,
                                           keyword_index=safe_keyword_index(persist_directory))

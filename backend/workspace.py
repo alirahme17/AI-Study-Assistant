@@ -97,7 +97,7 @@ def get_user_api_key(username: str) -> Optional[str]:
 # ----------------------------------------------------------------- status ---
 
 def write_status(username: str, status: str, message: str = "",
-                 db_dir: Optional[str] = None) -> None:
+                 db_dir: Optional[str] = None, embedding_model: Optional[str] = None) -> None:
     os.makedirs(workspace_path(username), exist_ok=True)
     previous = _read_status_file(username) or {}
     payload = {
@@ -106,6 +106,8 @@ def write_status(username: str, status: str, message: str = "",
         "updated_at": datetime.now(timezone.utc).isoformat(),
         # Keep pointing at the last good database until a new one is ready.
         "db_dir": db_dir if db_dir is not None else previous.get("db_dir"),
+        # Which embedding model built that database (queries must use the same one).
+        "embedding_model": embedding_model if embedding_model is not None else previous.get("embedding_model"),
     }
     tmp = _status_file(username) + ".tmp"
     with open(tmp, "w") as f:
@@ -129,3 +131,9 @@ def read_status(username: str) -> dict:
     if os.path.isdir(legacy_db_path(username)):
         return {"status": STATUS_READY, "message": ""}
     return {"status": STATUS_NOT_CONFIGURED, "message": ""}
+
+
+def embedding_model_for(username: str) -> str:
+    """The embedding model the user's active database was built with."""
+    from embeddings import LEGACY_MODEL
+    return read_status(username).get("embedding_model") or LEGACY_MODEL

@@ -218,7 +218,7 @@ def test_cli_stops_on_quota_then_resume_finishes_same_run(tmp_path, monkeypatch)
     monkeypatch.setattr(run_eval, "BACKEND_DIR", str(tmp_path))
     monkeypatch.setattr(run_eval, "QUESTIONS_CSV", str(tmp_path / "q.csv"))
     monkeypatch.setattr(run_eval, "RESULTS_DIR", str(tmp_path / "results"))
-    monkeypatch.setattr(main, "open_vector_store", lambda path: FakeStore())
+    monkeypatch.setattr(main, "open_vector_store", lambda path, *args: FakeStore())
     main.get_keyword_index.cache_clear()
     models = []
 
@@ -253,7 +253,7 @@ def test_compare_mode_writes_side_by_side_report(tmp_path, monkeypatch):
     monkeypatch.setattr(run_eval, "BACKEND_DIR", str(tmp_path))
     monkeypatch.setattr(run_eval, "QUESTIONS_CSV", str(tmp_path / "q.csv"))
     monkeypatch.setattr(run_eval, "RESULTS_DIR", str(tmp_path / "results"))
-    monkeypatch.setattr(main, "open_vector_store", lambda path: FakeStore())
+    monkeypatch.setattr(main, "open_vector_store", lambda path, *args: FakeStore())
     main.get_keyword_index.cache_clear()
     monkeypatch.setattr(main, "make_llm", lambda *a: (_ for _ in ()).throw(AssertionError("no LLM in compare")))
 

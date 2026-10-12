@@ -322,7 +322,7 @@ def write_report(results, summary, config, out_dir):
         f.write("\n".join(lines) + "\n")
 
 
-def compare_modes(questions, db, keyword_index, k, persist_directory):
+def compare_modes(questions, db, keyword_index, k, persist_directory, embedding_model):
     """Retrieval-only comparison of the three modes; writes eval/results/<stamp>_compare/report.md."""
     import main
     modes = ["vector", "bm25", "hybrid"]
@@ -332,7 +332,7 @@ def compare_modes(questions, db, keyword_index, k, persist_directory):
     answerable = [q for q in questions if not q["is_negative"]]
 
     lines = [f"# Retrieval comparison — {datetime.now().strftime('%Y%m%d-%H%M%S')}", "",
-             f"Embeddings `{main.EMBEDDING_MODEL}` · top-k {k} · {len(answerable)} answerable questions · "
+             f"Embeddings `{embedding_model}` · top-k {k} · {len(answerable)} answerable questions · "
              f"database `{os.path.basename(persist_directory)}`", "",
              "| Metric | " + " | ".join(modes) + " |", "|---|" + "---|" * len(modes),
              f"| hit@{k} (right page) | " + " | ".join(pct(summaries[m]["hit_at_k"]) for m in modes) + " |",
@@ -397,7 +397,7 @@ def main_cli(argv=None):
 
     os.chdir(BACKEND_DIR)  # workspaces/ is relative to the backend folder
     import main
-    from workspace import db_path, get_user_api_key
+    from workspace import db_path, embedding_model_for, get_user_api_key
 
     questions = load_questions(ids=set(args.ids.split(",")) if args.ids else None,
                                only_verified=not args.include_unverified)
@@ -407,12 +407,13 @@ def main_cli(argv=None):
     if persist_directory is None:
         sys.exit(f"No database for user '{args.user}'. Build or re-index it first.")
 
-    db = main.open_vector_store(persist_directory)
+    embedding_model = embedding_model_for(args.user)
+    db = main.open_vector_store(persist_directory, embedding_model)
     mode = args.retrieval or main.RETRIEVAL_MODE
     keyword_index = None if mode == "vector" and not args.compare else main.get_keyword_index(persist_directory)
 
     if args.compare:
-        return compare_modes(questions, db, keyword_index, args.k or main.TOP_K, persist_directory)
+        return compare_modes(questions, db, keyword_index, args.k or main.TOP_K, persist_directory, embedding_model)
 
     answer_model = args.model or main.LLM_MODEL
     llm = judge = None
@@ -441,7 +442,7 @@ def main_cli(argv=None):
         config = {"timestamp": stamp, "user": args.user, "db": os.path.basename(persist_directory),
                   "model": answer_model if llm else "none (retrieval only)",
                   "judge_model": args.judge_model if llm else None,
-                  "embedding_model": main.EMBEDDING_MODEL, "retrieval": mode, "k": args.k or main.TOP_K}
+                  "embedding_model": embedding_model, "retrieval": mode, "k": args.k or main.TOP_K}
         out_dir = os.path.join(RESULTS_DIR, f"{stamp}_{answer_model if llm else 'retrieval'}")
     config["planned"] = len(previous) + len(questions)
 

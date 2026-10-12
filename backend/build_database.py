@@ -2,16 +2,16 @@ import os
 import shutil
 from typing import Callable, Optional
 
-from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
 
 from process import process_user_pdfs
 from workspace import new_db_path, workspace_path
 
-EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+from embeddings import DEFAULT_MODEL, get_embeddings
 
 
-def build_user_database(username: str, progress: Optional[Callable[[str], None]] = None) -> str:
+def build_user_database(username: str, progress: Optional[Callable[[str], None]] = None,
+                        embedding_model: str = DEFAULT_MODEL) -> str:
     """Build a fresh ChromaDB for the user and return its folder name.
 
     Raises if there is nothing to index, so the caller can report an error
@@ -31,7 +31,7 @@ def build_user_database(username: str, progress: Optional[Callable[[str], None]]
     try:
         Chroma.from_documents(
             documents=chunks,
-            embedding=HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL),
+            embedding=get_embeddings(embedding_model),
             persist_directory=persist_directory,
         )
     except Exception:

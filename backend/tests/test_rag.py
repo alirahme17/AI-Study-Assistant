@@ -114,7 +114,7 @@ def _setup(tmp_path, monkeypatch, docs, llm):
     (tmp_path / "workspaces" / "alice" / "chroma_db_x").mkdir(parents=True)
     write_status("alice", STATUS_READY, db_dir="chroma_db_x")
     store = FakeStore(docs)
-    monkeypatch.setattr(main, "open_vector_store", lambda path: store)
+    monkeypatch.setattr(main, "open_vector_store", lambda path, *args: store)
     monkeypatch.setattr(main, "make_llm", lambda key: llm)
     return store
 
