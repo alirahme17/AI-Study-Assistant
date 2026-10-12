@@ -26,6 +26,7 @@ Rules:
 - After every sentence or claim that uses a source, cite it with its number in square brackets, e.g. [1] or [2][3].
 - If the sources do not contain the answer, say so plainly (e.g. "I couldn't find this in your course materials.") instead of guessing.
 - Be clear and concise. Use formulas and step-by-step explanations when they help a student understand.
+- Write math in LaTeX: $...$ inline and $$...$$ for display equations (e.g. $R = \\frac{c\\,f_b}{4 f_m \\Delta f}$).
 - Answer in the same language as the question."""
 
 CONDENSE_PROMPT = """Given the conversation so far and a follow-up question, rewrite the follow-up as a

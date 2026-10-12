@@ -13,6 +13,8 @@ rank_bm25
 rapidocr_onnxruntime
 sentence-transformers
 python-dotenv
+pyjwt[crypto]
+python-multipart
 
 # tests
 pytest
