@@ -104,3 +104,16 @@ def test_rrf_rewards_agreement():
         return Document(page_content=str(i), metadata={"chunk_id": i})
     fused = rrf_fuse([[d(1), d(2), d(3)], [d(3), d(4), d(1)]], k=2)
     assert [x.metadata["chunk_id"] for x in fused] == [1, 3]
+
+
+def test_hybrid_falls_back_to_keywords_when_embedding_quota_is_used_up(corpus):
+    from quota import QuotaExhausted
+
+    class OutOfQuota(FakeEmbedder):
+        def embed_query(self, text):
+            raise QuotaExhausted("PerDay")
+    with db.connect() as conn:
+        hits = search(conn, ALICE, OutOfQuota(), "What metric does DSDV use?", 3)
+        assert pages(hits)[0] == ("Wireless/ch3.pdf", 13)
+        with pytest.raises(QuotaExhausted):
+            search(conn, ALICE, OutOfQuota(), "DSDV", 3, fallback=False)

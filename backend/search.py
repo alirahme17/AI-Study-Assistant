@@ -114,14 +114,28 @@ def rrf_fuse(ranked_lists: List[List[Document]], k: int, rrf_k: int = RRF_K) -> 
 
 
 def search(conn, user_id, embedder, query: str, k: int, course: Optional[str] = None,
-           mode: str = "hybrid") -> List[Document]:
-    """Retrieve k chunks of this user's documents with mode "vector", "keyword" or "hybrid"."""
+           mode: str = "hybrid", fallback: bool = True) -> List[Document]:
+    """Retrieve k chunks of this user's documents with mode "vector", "keyword" or "hybrid".
+
+    fallback: if the embedding API's daily quota is used up, answer with keyword search
+    alone instead of failing (the evaluation turns this off to measure each mode honestly).
+    """
+    from quota import QuotaExhausted
     if mode == "bm25":
         mode = "keyword"          # name used by older evaluation reports
     if mode not in ("vector", "keyword", "hybrid"):
         raise ValueError(f"Unknown retrieval mode: {mode!r}")
+    query_vector = None
+    if mode != "keyword":
+        try:
+            query_vector = embedder.embed_query(query)
+        except QuotaExhausted:
+            if not fallback:
+                raise
+            print("Embedding quota used up: keyword search only for this question.")
+            mode = "keyword"
     n = k * CANDIDATES_PER_LIST if mode == "hybrid" else k
-    vector_hits = vector_search(conn, user_id, embedder.embed_query(query), n, course) if mode != "keyword" else []
+    vector_hits = vector_search(conn, user_id, query_vector, n, course) if mode != "keyword" else []
     keyword_hits = keyword_search(conn, user_id, query, n, course) if mode != "vector" else []
     if mode == "vector":
         return vector_hits

@@ -115,7 +115,8 @@ def run_worker(user_id, embedder=None, ocr=None) -> None:
             doc_id = doc[0]
             try:
                 index_document(doc, embedder, ocr, lambda m: _set_message(doc_id, m))
-            except QuotaExhausted:
+            except QuotaExhausted as e:
+                print(f"Indexing paused for {user_id}: daily quota reached ({e})")
                 with db.connect() as conn:
                     conn.execute("update tt_documents set status = 'pending', message = %s, updated_at = now() "
                                  "where id = %s and status = 'processing'", [PAUSED_MESSAGE, doc_id])

@@ -64,7 +64,8 @@ def chunk_pdf(data: bytes, ocr=None, on_page: Optional[Callable[[int, int], None
                     try:
                         text, from_ocr = ocr.read_page(page), True
                         result.ocr_pages += 1
-                    except QuotaExhausted:
+                    except QuotaExhausted as e:
+                        print(f"OCR daily quota reached, scanned pages skipped for now ({e})")
                         ocr = None          # stop calling OCR for the rest of this PDF
                 if not from_ocr:
                     result.ocr_skipped += 1  # keep whatever little text the page has

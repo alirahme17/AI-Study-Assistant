@@ -144,7 +144,8 @@ class DbRetriever:
         import db
         from search import search
         with db.connect() as conn:
-            return with_retry(lambda: search(conn, self.user_id, self.embedder, question, k, course, mode))
+            return with_retry(lambda: search(conn, self.user_id, self.embedder, question, k, course, mode,
+                                                    fallback=False))
 
 
 def evaluate(questions, retriever, llm=None, judge=None, k=None, delay=0.0, log=print, on_result=None, mode=None):
