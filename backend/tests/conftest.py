@@ -63,7 +63,7 @@ def database():
     wait_for_indexing()
     indexer._paused_until.clear()
     with db.connect() as conn:
-        conn.execute("truncate tt_chunks, tt_documents, tt_profiles")
+        conn.execute("truncate tt_chunks, tt_documents, tt_profiles, tt_embedding_cache, tt_ocr_cache")
     yield
     wait_for_indexing()
 

@@ -416,7 +416,8 @@ def main_cli(argv=None):
     if not key and settings.EMBEDDINGS != "fake":
         sys.exit(f"'{args.user}' has no Gemini API key saved (Settings in the app).")
     embedding_model = models or "unknown"
-    retriever = DbRetriever(user_id, make_embedder(key))
+    from cache import CachingEmbedder
+    retriever = DbRetriever(user_id, CachingEmbedder(make_embedder(key), user_id))   # reruns reuse query embeddings
     mode = args.retrieval or settings.RETRIEVAL_MODE
 
     if args.compare:

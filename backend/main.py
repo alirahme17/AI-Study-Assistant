@@ -25,6 +25,7 @@ import indexer
 import settings
 from auth import current_user
 from pages import render_page
+from cache import CachingEmbedder
 from providers import make_embedder
 from rag import build_messages, condense_question, message_text, number_sources, trim_history
 from search import search
@@ -144,7 +145,7 @@ def answer_stream(user_id: str, question: str, course: Optional[str], history_me
     def stream_events():
         try:
             llm = make_llm(api_key)
-            embedder = make_embedder(api_key)
+            embedder = CachingEmbedder(make_embedder(api_key), user_id)
             with db.connect() as conn:       # released before the (slow) answer streams
                 search_query, docs = retrieve(llm, conn, user_id, embedder, question, course, history)
             context, sources = number_sources(docs)

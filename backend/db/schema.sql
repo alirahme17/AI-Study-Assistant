@@ -62,6 +62,26 @@ create index if not exists tt_chunks_user_course on public.tt_chunks (user_id, c
 create index if not exists tt_chunks_document on public.tt_chunks (document_id);
 create index if not exists tt_chunks_fts on public.tt_chunks using gin (fts);
 
+-- Caches so the same Gemini call is never paid for twice (see cache.py).
+create table if not exists public.tt_embedding_cache (
+  user_id    uuid not null,
+  key        text not null,                    -- sha256(model | dims | kind | title | text)
+  embedding  extensions.vector(768) not null,
+  created_at timestamptz not null default now(),
+  primary key (user_id, key)
+);
+create table if not exists public.tt_ocr_cache (
+  user_id    uuid not null,
+  pdf_sha    text not null,                    -- sha256 of the PDF file
+  model      text not null,
+  page       int not null,
+  text       text not null,
+  created_at timestamptz not null default now(),
+  primary key (user_id, pdf_sha, model, page)
+);
+
 alter table public.tt_profiles  enable row level security;
 alter table public.tt_documents enable row level security;
 alter table public.tt_chunks    enable row level security;
+alter table public.tt_embedding_cache enable row level security;
+alter table public.tt_ocr_cache       enable row level security;

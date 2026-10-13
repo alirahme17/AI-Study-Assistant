@@ -17,6 +17,7 @@ from typing import Callable, Optional
 
 import db
 import documents
+from cache import CachingEmbedder, CachingOCR, pdf_sha
 from process import chunk_pdf
 from providers import make_embedder, make_ocr
 from quota import QuotaExhausted
@@ -51,6 +52,8 @@ def index_document(doc, embedder, ocr, progress: Callable[[str], None]) -> dict:
     """Read, chunk, embed and store one PDF. Raises QuotaExhausted to pause."""
     doc_id, course, name, storage_path = doc
     data = get_storage().get(storage_path)
+    if ocr is not None and getattr(embedder, "user_id", None) is not None:
+        ocr = CachingOCR(ocr, embedder.user_id, pdf_sha(data))   # scanned pages are read only once, ever
 
     last = [0.0]
 
@@ -107,6 +110,8 @@ def run_worker(user_id, embedder=None, ocr=None) -> None:
                 api_key = documents.get_api_key(conn, user_id)
             embedder = make_embedder(api_key)
             ocr = make_ocr(api_key)
+        if not isinstance(embedder, CachingEmbedder):
+            embedder = CachingEmbedder(embedder, user_id)        # passages are embedded only once, ever
         while True:
             with db.connect() as conn:
                 doc = claim_next(conn, user_id)
