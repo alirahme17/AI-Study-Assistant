@@ -118,7 +118,7 @@ def test_dev_mode_refuses_to_run_with_supabase_configured(monkeypatch, database)
 def test_health_reports_database(client):
     with client:                                   # runs the startup (schema + storage check)
         body = client.get("/api/health").json()
-    assert body["ok"] and body["db"] == "ok"
+    assert body["ok"] and body["db"] == "ok" and body["storage"] == "ok"
 
 
 # ---------------------------------------------------------------- key + library ---

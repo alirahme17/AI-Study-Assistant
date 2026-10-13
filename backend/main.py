@@ -30,7 +30,19 @@ from rag import build_messages, condense_question, message_text, number_sources,
 from search import search
 from storage import get_storage
 
-_startup = {"db": "not checked"}
+_startup = {"db": "not checked", "storage": "not checked"}
+
+
+def _check_storage() -> bool:
+    """Create the storage bucket if needed. Retried later if storage is temporarily down."""
+    try:
+        get_storage().ensure_ready()
+        _startup["storage"] = "ok"
+        return True
+    except Exception as e:
+        traceback.print_exc()
+        _startup["storage"] = f"{type(e).__name__}: {e}"[:300]
+        return False
 
 
 def prepare_backend() -> None:
@@ -40,11 +52,11 @@ def prepare_backend() -> None:
             if settings.AUTO_MIGRATE:
                 db.apply_schema(conn)
             conn.execute("select 1 from tt_documents limit 1")
-        get_storage().ensure_ready()
         _startup["db"] = "ok"
     except Exception as e:
         traceback.print_exc()
         _startup["db"] = f"{type(e).__name__}: {e}"[:300]
+    _check_storage()
 
 
 @asynccontextmanager
@@ -154,7 +166,10 @@ def answer_stream(user_id: str, question: str, course: Optional[str], history_me
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "auth_mode": auth.AUTH_MODE, "fake_llm": settings.FAKE_LLM, "db": _startup["db"]}
+    if _startup["storage"] != "ok":
+        _check_storage()
+    return {"ok": True, "auth_mode": auth.AUTH_MODE, "fake_llm": settings.FAKE_LLM,
+            "db": _startup["db"], "storage": _startup["storage"]}
 
 
 @app.get("/api/me")
@@ -202,6 +217,8 @@ async def upload_pdfs(course: str = Form(...), files: List[UploadFile] = File(..
         course = documents.clean_course(course)
     except ValueError as e:
         raise HTTPException(400, str(e))
+    if _startup["storage"] != "ok" and not _check_storage():
+        raise HTTPException(503, "File storage is temporarily unavailable. Try again in a few minutes.")
     saved = []
     for upload in files:
         try:
