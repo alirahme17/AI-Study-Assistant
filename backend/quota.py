@@ -12,6 +12,21 @@ class QuotaExhausted(Exception):
     """A daily (or otherwise long) quota ran out: retrying now is pointless."""
 
 
+def describe_quota(message: str) -> str:
+    """Short description of which Gemini quota ran out, from the 429 error details.
+
+    e.g. "EmbedContentRequestsPerDayPerProjectPerModel-FreeTier, limit 1000, model gemini-embedding-2"
+    """
+    quota_id = re.search(r"quotaId'?\"?:\s*'?\"?([A-Za-z0-9_\-]+)", message)
+    value = re.search(r"quotaValue'?\"?:\s*'?\"?(\d+)", message)
+    model = re.search(r"'model'?\"?:\s*'?\"?([a-z0-9.\-]+)", message)
+    parts = [quota_id.group(1) if quota_id else None,
+             f"limit {value.group(1)}" if value else None,
+             f"model {model.group(1)}" if model else None]
+    described = ", ".join(p for p in parts if p)
+    return described or message.split("\n")[0][:300]
+
+
 def _is_long_quota(message: str) -> bool:
     if re.search(r"PerDay|per day|daily", message, re.I):
         return True
@@ -41,7 +56,7 @@ def with_retry(fn, attempts=5, base_delay=5, sleep=None):
         except Exception as e:
             message = str(e)
             if re.search(r"429|RESOURCE_EXHAUSTED|quota", message, re.I) and _is_long_quota(message):
-                raise QuotaExhausted(message.split("\n")[0][:300]) from e
+                raise QuotaExhausted(describe_quota(message)) from e
             transient = re.search(r"429|rate|quota|exhausted|500|503|unavailable|timeout|deadline", message, re.I)
             if not transient or i == attempts - 1:
                 raise

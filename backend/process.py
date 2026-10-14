@@ -42,7 +42,9 @@ class ChunkedPdf:
     pages: int
     chunks: List[Chunk] = field(default_factory=list)
     ocr_pages: int = 0          # scanned pages read with OCR
-    ocr_skipped: int = 0        # scanned pages NOT read (no OCR, or the daily OCR quota ran out)
+    ocr_skipped: int = 0        # scanned pages NOT read (no OCR, daily OCR quota, or Gemini errors)
+    ocr_errors: int = 0         # ...of which failed because Gemini was unavailable
+    ocr_quota_hit: bool = False
 
 
 def chunk_pdf(data: bytes, ocr=None, on_page: Optional[Callable[[int, int], None]] = None) -> ChunkedPdf:
@@ -66,7 +68,11 @@ def chunk_pdf(data: bytes, ocr=None, on_page: Optional[Callable[[int, int], None
                         result.ocr_pages += 1
                     except QuotaExhausted as e:
                         print(f"OCR daily quota reached, scanned pages skipped for now ({e})")
+                        result.ocr_quota_hit = True
                         ocr = None          # stop calling OCR for the rest of this PDF
+                    except Exception as e:   # model overloaded (503) even after retries: skip this page only
+                        print(f"OCR failed on page {page_number}, skipped for now: {type(e).__name__}: {str(e)[:200]}")
+                        result.ocr_errors += 1
                 if not from_ocr:
                     result.ocr_skipped += 1  # keep whatever little text the page has
             text = clean_text(text)

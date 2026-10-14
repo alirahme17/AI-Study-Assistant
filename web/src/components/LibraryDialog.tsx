@@ -243,7 +243,9 @@ function FileRow({
   onRetry: () => void;
 }) {
   const status = file.message.startsWith("Paused") ? { label: "Paused", className: "text-muted" } : STATUS[file.status];
-  const detail = file.status === "processing" || file.status === "error" || file.message.startsWith("Paused");
+  const detail =
+    file.status === "processing" || file.status === "error" || file.message.startsWith("Paused") ||
+    file.message.includes("not read");
   return (
     <li className="py-1 pl-3 text-sm">
       <div className="flex items-center justify-between gap-3">
@@ -255,7 +257,7 @@ function FileRow({
             {status.label}
             {file.status === "ready" && file.pages ? <span className="text-muted"> · {file.pages} p.</span> : null}
           </span>
-          {file.status === "error" && (
+          {(file.status === "error" || (file.status === "ready" && file.message.includes("not read"))) && (
             <button disabled={disabled} onClick={onRetry} className="text-muted hover:text-ink disabled:opacity-40">
               Retry
             </button>

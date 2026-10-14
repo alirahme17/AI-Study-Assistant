@@ -29,8 +29,15 @@ _lock = threading.Lock()
 _running: set = set()                 # user ids with a worker thread in this process
 _paused_until: dict = {}              # user id -> time.time() before which we don't retry
 
-PAUSED_MESSAGE = ("Paused: your Gemini API key reached its free daily limit. "
-                  "Indexing continues automatically later (open the app again tomorrow).")
+PAUSED_MESSAGE = ("Paused: your Gemini API key reached its free daily limit{what}. "
+                  "Indexing continues after the daily reset (midnight Pacific time, 09:00 in France) "
+                  "- open the app then; nothing done so far is lost.")
+
+
+def _paused_message(error) -> str:
+    text = str(error)
+    what = " for embeddings" if "mbed" in text else " for reading scanned pages" if "enerate" in text else ""
+    return PAUSED_MESSAGE.format(what=what)
 
 
 def claim_next(conn, user_id):
@@ -72,8 +79,10 @@ def index_document(doc, embedder, ocr, progress: Callable[[str], None]) -> dict:
     if pdf.ocr_pages:
         notes.append(f"{pdf.ocr_pages} scanned page(s) read with OCR")
     if pdf.ocr_skipped:
+        reason = ("OCR daily limit reached" if pdf.ocr_quota_hit
+                  else "Gemini was unavailable" if pdf.ocr_errors else "")
         notes.append(f"{pdf.ocr_skipped} scanned page(s) not read"
-                     + (" (OCR daily limit reached - re-index later)" if ocr is not None else ""))
+                     + (f" ({reason} - use Retry later)" if reason and ocr is not None else ""))
     if not pdf.chunks:
         notes.append("no readable text found")
     message = f"{pdf.pages} pages, {len(pdf.chunks)} passages" + ("; " + "; ".join(notes) if notes else "")
@@ -124,7 +133,7 @@ def run_worker(user_id, embedder=None, ocr=None) -> None:
                 print(f"Indexing paused for {user_id}: daily quota reached ({e})")
                 with db.connect() as conn:
                     conn.execute("update tt_documents set status = 'pending', message = %s, updated_at = now() "
-                                 "where id = %s and status = 'processing'", [PAUSED_MESSAGE, doc_id])
+                                 "where id = %s and status = 'processing'", [_paused_message(e), doc_id])
                 with _lock:
                     _paused_until[user_id] = time.time() + PAUSE_SECONDS
                 return

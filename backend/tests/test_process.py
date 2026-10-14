@@ -81,3 +81,15 @@ def test_clean_text_removes_garbage_glyphs_but_keeps_real_text():
     assert "ଵ" not in cleaned and "" not in cleaned and "�" not in cleaned
     assert "énergie" in cleaned and "Δf" in cleaned and "≈" in cleaned and "½" in cleaned
     assert "  " not in cleaned
+
+
+def test_ocr_errors_skip_only_that_page():
+    class Flaky(FakeOCR):
+        def read_page(self, page):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("503 UNAVAILABLE: model is experiencing high demand")
+            return self.text
+    pdf = chunk_pdf(make_pdf([None, None, "Typed."], scanned={1, 2}), ocr=Flaky())
+    assert pdf.ocr_errors == 1 and pdf.ocr_skipped == 1 and pdf.ocr_pages == 1
+    assert {c.page for c in pdf.chunks} == {2, 3}
